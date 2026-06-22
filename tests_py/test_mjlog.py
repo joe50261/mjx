@@ -227,27 +227,16 @@ def test_state_json_round_trips_to_dict():
 def test_engine_replays_uploaded_game():
     """The native engine recomputes the whole Tenhou game from wall + actions."""
     report = MjlogReplayAgent.from_file(UPLOADED).validate_with_engine()
+    # Every round replays and the engine reproduces Tenhou's action stream.
     assert report.n_replayed == report.n_rounds == 10, report.summary()
-    # The engine reproduces Tenhou's action stream for (almost) every round.
-    assert report.n_action_match >= report.n_rounds - 1, report.summary()
-
-
-@requires_engine
-def test_engine_action_stream_matches_recorded_decisions():
-    """For matched rounds, the engine's applied actions equal Tenhou's."""
-    agent = MjlogReplayAgent.from_file(UPLOADED)
-    matched = 0
-    for r, state in zip(agent.game.rounds, agent.to_mjx_states()):
-        engine = MjlogReplayAgent._engine_actions(state.past_decisions())
-        tenhou = MjlogReplayAgent._tenhou_actions(r)
-        if engine == tenhou:
-            matched += 1
-    assert matched >= len(agent.game.rounds) - 1
+    assert report.n_action_match == report.n_rounds, report.summary()
 
 
 @requires_engine
 @pytest.mark.parametrize("path", MJLOGS, ids=[os.path.basename(p) for p in MJLOGS])
 def test_engine_replays_corpus(path):
-    """Every round of every bundled game replays through the engine cleanly."""
+    """Every round of every bundled game replays through the engine and the
+    engine's regenerated action stream matches Tenhou exactly."""
     report = MjlogReplayAgent.from_file(path).validate_with_engine(raise_on_error=False)
     assert report.n_replayed == report.n_rounds, report.summary()
+    assert report.n_action_match == report.n_rounds, report.summary()

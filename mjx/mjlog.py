@@ -765,6 +765,8 @@ def _reconstruct_events(r: RoundLog) -> List[Dict]:
     riichi (one that placed a stick) is followed by ``RIICHI_SCORE_CHANGE``.
     """
     confirmed = {who for who, _ in r.riichi_confirmations}
+    kan_doras = r.dora_indicators[1:]  # one new dora is revealed per kan
+    kan_dora_idx = 0
     events: List[Dict] = []
     last_draw: List[Optional[int]] = [None, None, None, None]
     for e in r.events:
@@ -791,6 +793,18 @@ def _reconstruct_events(r: RoundLog) -> List[Dict]:
             if e.meld is not None:
                 event["open"] = e.meld.m  # mjx uses Tenhou's meld encoding
             events.append(event)
+            # A kan reveals a new dora; the engine emits a NEW_DORA event, so it
+            # must be present here or the replay stops short of the round's end.
+            # The log records exactly len(dora_indicators) - 1 kan-dora reveals
+            # (a kan that wins on its rinshan tile may not reveal one), so only
+            # emit while a recorded indicator remains.
+            if e.type in (
+                DecisionType.CLOSED_KAN,
+                DecisionType.OPEN_KAN,
+                DecisionType.ADDED_KAN,
+            ) and kan_dora_idx < len(kan_doras):
+                events.append({"type": "EVENT_TYPE_NEW_DORA", "tile": kan_doras[kan_dora_idx]})
+                kan_dora_idx += 1
     return events
 
 
@@ -992,9 +1006,35 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
                     raise MjlogValidationError(msg) from exc
                 continue
             report.n_replayed += 1
-            if self._engine_actions(decisions) == self._tenhou_actions(r):
+            engine = self._normalize_rons(self._engine_actions(decisions))
+            tenhou = self._normalize_rons(self._tenhou_actions(r))
+            if engine == tenhou:
                 report.n_action_match += 1
         return report
+
+    @staticmethod
+    def _normalize_rons(
+        actions: List[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        """Sort each run of simultaneous RON actions by seat.
+
+        On a multi-ron the engine and Tenhou may list the winners in a
+        different order; the wins are simultaneous, so order is not meaningful.
+        """
+        ron = int(_ActionType.RON)
+        out: List[Tuple[int, int]] = []
+        i = 0
+        while i < len(actions):
+            if actions[i][1] == ron:
+                j = i
+                while j < len(actions) and actions[j][1] == ron:
+                    j += 1
+                out.extend(sorted(actions[i:j]))
+                i = j
+            else:
+                out.append(actions[i])
+                i += 1
+        return out
 
     @staticmethod
     def _engine_actions(decisions) -> List[Tuple[int, int]]:
