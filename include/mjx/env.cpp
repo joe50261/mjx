@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/env.h"
 
 #include <filesystem>

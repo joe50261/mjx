@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/internal/wall.h"
 
 #include <array>

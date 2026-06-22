@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/agent.h"
 
 #include <grpcpp/ext/proto_server_reflection_plugin.h>

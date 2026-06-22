@@ -1,6 +1,7 @@
 #ifndef MJX_SEED_GENERATOR_H
 #define MJX_SEED_GENERATOR_H
 
+#include <cstdint>
 #include <queue>
 #include <thread>
 

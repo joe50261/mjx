@@ -29,3 +29,6 @@ workspace/suphx-reward-shaping/check/*
 .DS_Store
 .vscode/
 .python_version
+
+# built native extension
+_mjx*.so
