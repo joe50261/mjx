@@ -1,6 +1,7 @@
 #ifndef MAHJONG_GAME_SEED_H
 #define MAHJONG_GAME_SEED_H
 
+#include <cstdint>
 #include <random>
 #include <vector>
 

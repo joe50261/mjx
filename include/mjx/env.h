@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <optional>
 
 #include "mjx/action.h"

@@ -1,6 +1,12 @@
 set(protobuf_MODULE_COMPATIBLE TRUE)
 find_package(Threads REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
+# Prefer Protobuf's CMake CONFIG package, but fall back to the module-mode
+# finder (FindProtobuf) for distributions (e.g. Ubuntu) that ship libprotobuf
+# without a ProtobufConfig.cmake. Both provide the protobuf::libprotobuf target.
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+  find_package(Protobuf MODULE REQUIRED)
+endif()
 find_package(gRPC CONFIG REQUIRED)
 
 message(STATUS "Using Protobuf ${Protobuf_VERSION}")

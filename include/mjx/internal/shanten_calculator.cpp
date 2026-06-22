@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/internal/shanten_calculator.h"
 
 namespace mjx::internal {

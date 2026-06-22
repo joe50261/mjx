@@ -1,6 +1,7 @@
 #ifndef MAHJONG_ACTION_H
 #define MAHJONG_ACTION_H
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <utility>

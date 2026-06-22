@@ -1,6 +1,7 @@
 #ifndef MAHJONG_TILE_H
 #define MAHJONG_TILE_H
 
+#include <cstdint>
 #include <string>
 
 #include "mjx/internal/types.h"

@@ -1,6 +1,7 @@
 #ifndef MAHJONG_WALL_H
 #define MAHJONG_WALL_H
 
+#include <cstdint>
 #include <vector>
 
 #include "mjx/internal/game_seed.h"

@@ -1,6 +1,7 @@
 #ifndef MAHJONG_OPEN_H
 #define MAHJONG_OPEN_H
 
+#include <cstdint>
 #include <bitset>
 #include <memory>
 #include <vector>

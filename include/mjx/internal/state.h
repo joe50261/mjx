@@ -1,6 +1,7 @@
 #ifndef MAHJONG_STATE_H
 #define MAHJONG_STATE_H
 
+#include <cstdint>
 #include <array>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>

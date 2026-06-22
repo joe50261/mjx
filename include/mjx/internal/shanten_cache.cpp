@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/internal/shanten_cache.h"
 
 #include <boost/property_tree/json_parser.hpp>
