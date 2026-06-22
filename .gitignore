@@ -3,6 +3,7 @@ cmake-build-*/*
 build/*
 build_py/*
 _mjx*.so
+viz_out/*
 external/*
 tests_cpp/external/*
 docker-build/*
