@@ -167,3 +167,9 @@ def validate_agent(agent: Agent, n_games=1, use_batch=False):
                 assert action in obs.legal_actions()
                 action_dict[player_id] = action
             obs_dict = env.step(action_dict)
+
+
+# Re-exported so that ``MjlogReplayAgent`` lives alongside the other agents.
+# The implementation is engine-independent for parsing/validation; see
+# ``mjx.mjlog`` for details.
+from mjx.mjlog import MjlogReplayAgent  # noqa: E402,F401
