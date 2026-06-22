@@ -192,3 +192,62 @@ def test_act_requires_engine_when_absent():
     if not m._ENGINE_AVAILABLE:
         with pytest.raises(RuntimeError):
             agent.act(object())
+
+
+# ---------------------------------------------------------------------------
+# Engine reconstruction / replay
+# ---------------------------------------------------------------------------
+
+import mjx.mjlog as _m  # noqa: E402
+
+requires_engine = pytest.mark.skipif(
+    not _m._ENGINE_AVAILABLE, reason="native _mjx engine not built"
+)
+
+
+def test_reconstructed_wall_is_permutation():
+    # Engine-independent: the wall we hand the engine must be a 0..135 permutation.
+    game = parse_mjlog(UPLOADED)
+    for r in game.rounds:
+        wall = _m._reconstruct_wall(r)
+        assert sorted(wall) == list(range(136))
+
+
+def test_state_json_round_trips_to_dict():
+    game = parse_mjlog(UPLOADED)
+    import json
+
+    d = json.loads(_m.round_to_state_json(game.rounds[0]))
+    assert len(d["hiddenState"]["wall"]) == 136
+    assert d["publicObservation"]["initScore"]["tens"] == [25000, 25000, 25000, 25000]
+    assert d["publicObservation"]["events"][0]["type"] == "EVENT_TYPE_DRAW"
+
+
+@requires_engine
+def test_engine_replays_uploaded_game():
+    """The native engine recomputes the whole Tenhou game from wall + actions."""
+    report = MjlogReplayAgent.from_file(UPLOADED).validate_with_engine()
+    assert report.n_replayed == report.n_rounds == 10, report.summary()
+    # The engine reproduces Tenhou's action stream for (almost) every round.
+    assert report.n_action_match >= report.n_rounds - 1, report.summary()
+
+
+@requires_engine
+def test_engine_action_stream_matches_recorded_decisions():
+    """For matched rounds, the engine's applied actions equal Tenhou's."""
+    agent = MjlogReplayAgent.from_file(UPLOADED)
+    matched = 0
+    for r, state in zip(agent.game.rounds, agent.to_mjx_states()):
+        engine = MjlogReplayAgent._engine_actions(state.past_decisions())
+        tenhou = MjlogReplayAgent._tenhou_actions(r)
+        if engine == tenhou:
+            matched += 1
+    assert matched >= len(agent.game.rounds) - 1
+
+
+@requires_engine
+@pytest.mark.parametrize("path", MJLOGS, ids=[os.path.basename(p) for p in MJLOGS])
+def test_engine_replays_corpus(path):
+    """Every round of every bundled game replays through the engine cleanly."""
+    report = MjlogReplayAgent.from_file(path).validate_with_engine(raise_on_error=False)
+    assert report.n_replayed == report.n_rounds, report.summary()

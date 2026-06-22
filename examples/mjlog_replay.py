@@ -30,6 +30,8 @@ def main(argv):
     for pattern in argv:
         paths.extend(sorted(glob.glob(pattern)) or [pattern])
 
+    import mjx.mjlog as mjlog
+
     n_ok = 0
     for path in paths:
         agent = MjlogReplayAgent.from_file(path)
@@ -38,6 +40,10 @@ def main(argv):
         status = "OK  " if report.ok else "FAIL"
         print(f"{status} {name}")
         print(report.summary())
+        # When the native engine is built, additionally replay the recorded
+        # game through it and validate the engine's state computation.
+        if mjlog._ENGINE_AVAILABLE:
+            print(agent.validate_with_engine(raise_on_error=False).summary())
         print()
         n_ok += report.ok
 

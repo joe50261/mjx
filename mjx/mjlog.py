@@ -127,6 +127,7 @@ class Meld:
     tiles: Tuple[int, ...]
     called: int
     from_who: int
+    m: int = 0  # the raw Tenhou meld bit field (mjx uses the same encoding)
 
     @property
     def stolen_tile(self) -> int:
@@ -151,7 +152,7 @@ def decode_meld(who: int, data: Union[int, str]) -> Meld:
         base = base_and_called // 3
         base = (base // 7) * 9 + base % 7
         tiles = (t0 + 4 * (base + 0), t1 + 4 * (base + 1), t2 + 4 * (base + 2))
-        return Meld(who, "chi", tiles, called, from_who)
+        return Meld(who, "chi", tiles, called, from_who, data)
 
     if data & 0x18:  # pon or added kan
         unused = (data >> 5) & 0x3
@@ -161,10 +162,10 @@ def decode_meld(who: int, data: Union[int, str]) -> Meld:
         base = base_and_called // 3
         if data & 0x8:  # pon
             tiles = (t0 + 4 * base, t1 + 4 * base, t2 + 4 * base)
-            return Meld(who, "pon", tiles, called, from_who)
+            return Meld(who, "pon", tiles, called, from_who, data)
         # added kan (chakan): the 4th tile is added to an existing pon
         tiles = (t0 + 4 * base, t1 + 4 * base, t2 + 4 * base, unused + 4 * base)
-        return Meld(who, "added_kan", tiles, 3, from_who)
+        return Meld(who, "added_kan", tiles, 3, from_who, data)
 
     # kan (closed when taken from self, open otherwise)
     base_and_called = data >> 8
@@ -172,7 +173,7 @@ def decode_meld(who: int, data: Union[int, str]) -> Meld:
     base = base_and_called // 4
     tiles = (4 * base, 1 + 4 * base, 2 + 4 * base, 3 + 4 * base)
     kind = "closed_kan" if rel_from == 0 else "open_kan"
-    return Meld(who, kind, tiles, called, from_who)
+    return Meld(who, kind, tiles, called, from_who, data)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +657,200 @@ def _validate_round_flow(r: RoundLog, err, label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Engine bridge: reconstruct an mjx (mjxproto) State from a recorded round so
+# that the native engine can *replay* the Tenhou game and we can validate that
+# the engine's state computation agrees with Tenhou.
+# ---------------------------------------------------------------------------
+
+# Tenhou / mjx share the wall layout (see internal/wall.h):
+#   [0..51]   initial hands (depend on the round/dealer)
+#   [52..121] live draws (tsumo)
+#   [122,124,126,128] kan dora indicators (1st..4th -> 128,126,124,122)
+#   [123,125,127,129] kan ura dora indicators
+#   [130] dora indicator, [131] ura dora indicator
+#   [132..135] rinshan (kan) draws, taken in the order 134,135,132,133
+_RINSHAN_WALL_IXS = (134, 135, 132, 133)
+
+# mjx event-type names (used in the State JSON the engine consumes).
+_EVENT_NAME = {
+    DecisionType.CHI: "EVENT_TYPE_CHI",
+    DecisionType.PON: "EVENT_TYPE_PON",
+    DecisionType.CLOSED_KAN: "EVENT_TYPE_CLOSED_KAN",
+    DecisionType.OPEN_KAN: "EVENT_TYPE_OPEN_KAN",
+    DecisionType.ADDED_KAN: "EVENT_TYPE_ADDED_KAN",
+    DecisionType.TSUMO: "EVENT_TYPE_TSUMO",
+    DecisionType.RON: "EVENT_TYPE_RON",
+    DecisionType.ABORTIVE_DRAW_NINE_TERMINALS: "EVENT_TYPE_ABORTIVE_DRAW_NINE_TERMINALS",
+}
+
+
+def _reconstruct_wall(r: RoundLog) -> List[int]:
+    """Rebuild the 136-tile wall (in mjx/Tenhou order) for a round.
+
+    Every tile the engine actually reads while replaying -- initial hands,
+    live draws, rinshan draws and the revealed dora/ura indicators -- is placed
+    at its canonical wall index.  Tiles that the log never reveals (undrawn live
+    wall, unrevealed dead wall) are filled with the remaining ids so the wall is
+    a valid permutation; the engine never reads those positions during replay.
+    """
+    wall: List[Optional[int]] = [None] * 136
+    used = set()
+
+    def place(ix: int, tile: int) -> None:
+        wall[ix] = tile
+        used.add(tile)
+
+    rnd = r.round
+    for pos in range(4):
+        seat = (pos - rnd) % 4  # deal order relative to the dealer
+        base = seat * 4
+        idxs = (
+            list(range(base, base + 4))
+            + list(range(base + 16, base + 20))
+            + list(range(base + 32, base + 36))
+            + [48 + seat]
+        )
+        for tile, ix in zip(r.init_hands[pos], idxs):
+            place(ix, tile)
+
+    # Separate live draws from rinshan (kan) draws: a draw is a rinshan draw if
+    # it immediately follows a kan by the same player.
+    live, rinshan = [], []
+    pending_kan: Optional[int] = None
+    for e in r.events:
+        if e.type in (
+            DecisionType.CLOSED_KAN,
+            DecisionType.OPEN_KAN,
+            DecisionType.ADDED_KAN,
+        ):
+            pending_kan = e.who
+        elif e.type is DecisionType.DRAW:
+            (rinshan if pending_kan == e.who else live).append(e.tile)
+            pending_kan = None
+    for i, tile in enumerate(live):
+        place(52 + i, tile)
+    for n, tile in enumerate(rinshan):
+        place(_RINSHAN_WALL_IXS[n], tile)
+
+    # Dora indicators: [130] then kan dora at 128, 126, 124, 122.
+    place(130, r.dora_indicators[0])
+    for n, d in enumerate(r.dora_indicators[1:]):
+        place(128 - 2 * n, d)
+
+    # Ura dora (only revealed by a riichi win): [131] then 129, 127, 125, 123.
+    ura: List[int] = []
+    for res in r.results:
+        if isinstance(res, Win) and res.ura_dora_indicators:
+            ura = res.ura_dora_indicators
+    if ura:
+        place(131, ura[0])
+        for n, u in enumerate(ura[1:]):
+            place(129 - 2 * n, u)
+
+    leftover = [t for t in range(136) if t not in used]
+    it = iter(leftover)
+    for ix in range(136):
+        if wall[ix] is None:
+            wall[ix] = next(it)
+    assert sorted(wall) == list(range(136)), "reconstructed wall is not a permutation"
+    return wall  # type: ignore[return-value]
+
+
+def _reconstruct_events(r: RoundLog) -> List[Dict]:
+    """Translate a round into the mjx public-event stream.
+
+    Tenhou's element order already matches mjx's event order, so this is a
+    direct mapping, with two refinements that mirror the engine:
+    riichi is a ``RIICHI`` event followed by the discard, and a *confirmed*
+    riichi (one that placed a stick) is followed by ``RIICHI_SCORE_CHANGE``.
+    """
+    confirmed = {who for who, _ in r.riichi_confirmations}
+    events: List[Dict] = []
+    last_draw: List[Optional[int]] = [None, None, None, None]
+    for e in r.events:
+        if e.type is DecisionType.DRAW:
+            events.append({"type": "EVENT_TYPE_DRAW", "who": e.who})
+            last_draw[e.who] = e.tile
+        elif e.type is DecisionType.DISCARD:
+            events.append({"type": "EVENT_TYPE_DISCARD", "who": e.who, "tile": e.tile})
+            last_draw[e.who] = None
+        elif e.type is DecisionType.TSUMOGIRI:
+            events.append({"type": "EVENT_TYPE_TSUMOGIRI", "who": e.who, "tile": e.tile})
+            last_draw[e.who] = None
+        elif e.type is DecisionType.RIICHI:
+            events.append({"type": "EVENT_TYPE_RIICHI", "who": e.who})
+            sub = "EVENT_TYPE_TSUMOGIRI" if last_draw[e.who] == e.tile else "EVENT_TYPE_DISCARD"
+            events.append({"type": sub, "who": e.who, "tile": e.tile})
+            last_draw[e.who] = None
+            if e.who in confirmed:
+                events.append({"type": "EVENT_TYPE_RIICHI_SCORE_CHANGE", "who": e.who})
+        elif e.type in _EVENT_NAME:
+            event = {"type": _EVENT_NAME[e.type], "who": e.who}
+            if e.tile is not None:
+                event["tile"] = e.tile
+            if e.meld is not None:
+                event["open"] = e.meld.m  # mjx uses Tenhou's meld encoding
+            events.append(event)
+    return events
+
+
+def round_to_state_dict(r: RoundLog) -> Dict:
+    """Build the mjxproto ``State`` (as a dict) the engine can replay.
+
+    Only the fields the engine reads to regenerate a round are populated: the
+    reconstructed wall, the player ids, the opening :class:`Score` (note Tenhou
+    scores are in units of 100, mjx uses raw points) and the public event
+    stream.  Hands, draws, dora and per-step observations are recomputed by the
+    engine from these.
+    """
+    return {
+        "hiddenState": {"wall": _reconstruct_wall(r)},
+        "publicObservation": {
+            "playerIds": [f"player_{i}" for i in range(4)],
+            "initScore": {
+                "round": r.round,
+                "honba": r.honba,
+                "riichi": r.riichi_sticks,
+                "tens": [t * 100 for t in r.init_scores],
+            },
+            "events": _reconstruct_events(r),
+        },
+    }
+
+
+def round_to_state_json(r: RoundLog) -> str:
+    """JSON form of :func:`round_to_state_dict` (accepted by ``mjx.State``)."""
+    import json
+
+    return json.dumps(round_to_state_dict(r))
+
+
+@dataclass
+class EngineValidationReport:
+    """Outcome of replaying a game through the native engine."""
+
+    n_rounds: int = 0
+    n_replayed: int = 0  # rounds the engine replayed without a consistency error
+    n_action_match: int = 0  # rounds whose engine action stream matched Tenhou
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors and self.n_replayed == self.n_rounds
+
+    def summary(self) -> str:
+        head = "OK" if self.ok else "issues"
+        lines = [
+            f"engine replay: {head}",
+            f"  rounds replayed: {self.n_replayed}/{self.n_rounds}",
+            f"  action streams:  {self.n_action_match}/{self.n_rounds} match Tenhou",
+        ]
+        for e in self.errors:
+            lines.append(f"  - {e}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # MjlogReplayAgent
 # ---------------------------------------------------------------------------
 
@@ -696,20 +891,30 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
     """Replay a recorded Tenhou game.
 
     Construct it from a ``.mjlog`` file (or a parsed :class:`MjlogGame`) and it
-    will reproduce, in order, every decision the players made.  Two ways to use
-    it:
+    will reproduce, in order, every decision the players made.  There are two
+    distinct things you can check:
 
-    * **Validation (no native build required).** ``agent.validate()`` re-derives
-      the full score / kyotaku / honba / hand bookkeeping and checks it against
-      the values stored in the log::
+    * **Log self-consistency (no native build required).** ``agent.validate()``
+      re-derives the full score / kyotaku / honba / hand bookkeeping from the
+      recorded deltas and checks it against the values stored in the log.  This
+      validates the *log*, treating Tenhou as the oracle::
 
           report = MjlogReplayAgent.from_file("game.mjlog").validate()
           assert report.ok
 
-    * **Engine replay.** When Mjx is built, the agent is a normal
-      :class:`mjx.Agent`: feed it to :class:`mjx.MjxEnv` and ``act`` returns the
-      recorded action for each observation, so the engine recomputes the state
-      and you can compare it against the log.
+    * **Engine validation (requires the native build).**
+      ``agent.validate_with_engine()`` hands the recorded wall and actions to
+      the Mjx engine, which independently recomputes the hands, draws, dora,
+      legal actions and state transitions, and checks that the engine replays
+      the whole game and reproduces Tenhou's action stream.  This validates the
+      *engine* against Tenhou ground truth::
+
+          report = MjlogReplayAgent.from_file("game.mjlog").validate_with_engine()
+          assert report.n_replayed == report.n_rounds
+
+    When Mjx is built the agent is also a normal :class:`mjx.Agent` (``act``
+    returns the recorded action for an observation), so it can be plugged into
+    other engine machinery.
     """
 
     def __init__(self, game: MjlogGame) -> None:
@@ -737,6 +942,96 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
         out: List[Decision] = []
         for r in self.game.rounds:
             out.extend(r.decisions)
+        return out
+
+    # -- engine replay (validates the Mjx engine, requires the native build) --
+    def to_state_json(self, round_index: int) -> str:
+        """mjxproto ``State`` JSON for a round, replayable by ``mjx.State``.
+
+        This is engine-independent (it only builds JSON); feed it to
+        ``mjx.State(...)`` to have the native engine replay the round.
+        """
+        return round_to_state_json(self.game.rounds[round_index])
+
+    def to_mjx_states(self) -> List["object"]:
+        """Reconstruct one ``mjx.State`` per round (requires ``_mjx``)."""
+        if not _ENGINE_AVAILABLE:
+            raise RuntimeError("to_mjx_states requires the native Mjx engine (_mjx).")
+        from mjx.state import State  # local import: needs the engine
+
+        return [State(round_to_state_json(r)) for r in self.game.rounds]  # type: ignore[arg-type]
+
+    def validate_with_engine(self, raise_on_error: bool = False) -> "EngineValidationReport":
+        """Replay every round through the native engine and check the result.
+
+        For each round the recorded Tenhou wall and actions are handed to the
+        engine, which independently recomputes the hands, draws, dora, legal
+        actions and state transitions (via ``State.past_decisions``).  Two
+        things are checked:
+
+        * the engine replays the whole round without raising a consistency
+          error -- i.e. every recorded action was legal in the engine's own
+          recomputed observation; and
+        * the engine's regenerated action stream matches Tenhou's recorded
+          decisions.
+
+        Requires the native ``_mjx`` extension.
+        """
+        if not _ENGINE_AVAILABLE:
+            raise RuntimeError("validate_with_engine requires the native Mjx engine (_mjx).")
+        from mjx.state import State  # local import: needs the engine
+
+        report = EngineValidationReport(n_rounds=len(self.game.rounds))
+        for i, r in enumerate(self.game.rounds):
+            try:
+                decisions = State(round_to_state_json(r)).past_decisions()
+            except Exception as exc:  # an engine assertion / inconsistency
+                msg = f"round {i}: engine failed to replay: {exc}"
+                report.errors.append(msg)
+                if raise_on_error:
+                    raise MjlogValidationError(msg) from exc
+                continue
+            report.n_replayed += 1
+            if self._engine_actions(decisions) == self._tenhou_actions(r):
+                report.n_action_match += 1
+        return report
+
+    @staticmethod
+    def _engine_actions(decisions) -> List[Tuple[int, int]]:
+        """(who, ActionType) of each non-pass/dummy action the engine applied."""
+        skip = {_ActionType.PASS, _ActionType.DUMMY}
+        out = []
+        for _obs, act in decisions:
+            t = act.type()
+            if t not in skip:
+                out.append((int(act.who()), int(t)))
+        return out
+
+    @staticmethod
+    def _tenhou_actions(r: RoundLog) -> List[Tuple[int, int]]:
+        """The recorded decisions as (who, ActionType), mirroring the engine.
+
+        Riichi is expanded to a RIICHI action plus the discard (tsumogiri when
+        the riichi tile is the drawn tile) to match how the engine replays it.
+        """
+        out: List[Tuple[int, int]] = []
+        last_draw: List[Optional[int]] = [None, None, None, None]
+        for e in r.events:
+            if e.type is DecisionType.DRAW:
+                last_draw[e.who] = e.tile
+                continue
+            if e.type is DecisionType.RIICHI:
+                out.append((e.who, int(_ActionType.RIICHI)))
+                sub = (
+                    DecisionType.TSUMOGIRI if last_draw[e.who] == e.tile else DecisionType.DISCARD
+                )
+                out.append((e.who, int(getattr(_ActionType, sub.name))))
+                last_draw[e.who] = None
+            else:
+                name = _DECISION_TO_ACTION_NAME[e.type]
+                out.append((e.who, int(getattr(_ActionType, name))))
+                if e.type in (DecisionType.DISCARD, DecisionType.TSUMOGIRI):
+                    last_draw[e.who] = None
         return out
 
     def _reset_cursor(self) -> None:
