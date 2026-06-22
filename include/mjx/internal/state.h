@@ -58,10 +58,6 @@ class State {
   mjxproto::Observation observation(const PlayerId& player_id) const;
   static std::vector<std::pair<mjxproto::Observation, mjxproto::Action>>
   GeneratePastDecisions(const mjxproto::State& proto) noexcept;
-  // Replays the public events of `proto` from its wall and returns the fully
-  // recomputed state (including the round terminal: scores, wins, tenpai).
-  static mjxproto::State GenerateFinalState(
-      const mjxproto::State& proto) noexcept;
 
   static std::vector<PlayerId> ShufflePlayerIds(
       std::uint64_t game_seed, const std::vector<PlayerId>& player_ids);

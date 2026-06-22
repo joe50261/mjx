@@ -43,8 +43,4 @@ std::vector<std::pair<Observation, Action>> State::past_decisions()
   }
   return decisions;
 }
-
-State State::replay() const noexcept {
-  return State(internal::State::GenerateFinalState(proto()));
-}
 }  // namespace mjx

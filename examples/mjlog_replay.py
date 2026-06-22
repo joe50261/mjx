@@ -1,24 +1,23 @@
-"""Replay Tenhou ``.mjlog`` games and validate the state computation.
+"""Parse Tenhou ``.mjlog`` games and validate the log's self-consistency.
 
 Usage::
 
     python examples/mjlog_replay.py path/to/game.mjlog [more.mjlog ...]
     python examples/mjlog_replay.py 'tests_py/resources/mjlog/*.mjlog'
 
-For each file it parses the log, re-derives every score / kyotaku / honba /
-hand transition and checks it against the values recorded by Tenhou.  This uses
-only :mod:`mjx.mjlog`, which is pure Python, so it works even when the native
-Mjx engine is not built.
+For each file it parses the log and re-derives every score / kyotaku / honba /
+hand transition, checking it against the values Tenhou recorded. This is pure
+Python (``mjx.mjlog``) and needs no native build.
 
-When the native engine *is* available, the same :class:`mjx.mjlog.MjlogReplay
-Agent` is an ``mjx.Agent`` and can be fed to ``mjx.MjxEnv`` to re-run the game
-through the engine and compare the recomputed observations against the log.
+``mjx.mjlog.MjlogReplayAgent`` is a separate, thin :class:`mjx.Agent` that
+replays the recorded actions (``act(obs)`` returns the logged action); it is
+not exercised here.
 """
 
 import glob
 import sys
 
-from mjx.mjlog import MjlogReplayAgent
+from mjx.mjlog import parse_mjlog
 
 
 def main(argv):
@@ -30,20 +29,13 @@ def main(argv):
     for pattern in argv:
         paths.extend(sorted(glob.glob(pattern)) or [pattern])
 
-    import mjx.mjlog as mjlog
-
     n_ok = 0
     for path in paths:
-        agent = MjlogReplayAgent.from_file(path)
-        report = agent.validate(raise_on_error=False)
+        report = parse_mjlog(path).validate(raise_on_error=False)
         name = path.rsplit("/", 1)[-1]
         status = "OK  " if report.ok else "FAIL"
         print(f"{status} {name}")
         print(report.summary())
-        # When the native engine is built, additionally replay the recorded
-        # game through it and validate the engine's state computation.
-        if mjlog._ENGINE_AVAILABLE:
-            print(agent.validate_with_engine(raise_on_error=False).summary())
         print()
         n_ok += report.ok
 

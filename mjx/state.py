@@ -47,16 +47,6 @@ class State:
             for obs, act in self._cpp_obj.past_decisions()
         ]
 
-    def replay(self) -> State:
-        """Replay this state through the engine and return the fully recomputed
-        state, including the round terminal (scores, wins, tenpai).
-
-        Used to validate the engine's state computation against recorded data:
-        build a State from a Tenhou log (wall + events) and compare
-        ``state.replay().to_proto().round_terminal`` with the log.
-        """
-        return State._from_cpp_obj(self._cpp_obj.replay())
-
     def save_svg(self, filename: str, view_idx: int = 0):
         assert filename.endswith(".svg")
         assert 0 <= view_idx < 4
