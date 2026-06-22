@@ -1,6 +1,7 @@
 #ifndef MAHJONG_SHANTEN_CACHE_H
 #define MAHJONG_SHANTEN_CACHE_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>

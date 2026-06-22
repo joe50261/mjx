@@ -1,6 +1,8 @@
 .idea/*
 cmake-build-*/*
 build/*
+build_py/*
+_mjx*.so
 external/*
 tests_cpp/external/*
 docker-build/*
