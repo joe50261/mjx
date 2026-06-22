@@ -227,16 +227,34 @@ def test_state_json_round_trips_to_dict():
 def test_engine_replays_uploaded_game():
     """The native engine recomputes the whole Tenhou game from wall + actions."""
     report = MjlogReplayAgent.from_file(UPLOADED).validate_with_engine()
-    # Every round replays and the engine reproduces Tenhou's action stream.
+    assert report.ok, report.summary()
+    # Every round replays, the action stream matches, and the recomputed round
+    # terminal (scores / wins / yaku / fu / tenpai) matches Tenhou.
     assert report.n_replayed == report.n_rounds == 10, report.summary()
     assert report.n_action_match == report.n_rounds, report.summary()
+    assert report.n_state_match == report.n_state_checked == 10, report.summary()
+
+
+@requires_engine
+def test_engine_recomputes_round_terminal():
+    """Spot-check the engine's recomputed terminal exposed via State.replay()."""
+    agent = MjlogReplayAgent.from_file(UPLOADED)
+    rt = agent.to_mjx_states()[0].replay().to_proto().round_terminal
+    assert list(rt.final_score.tens) == [25000, 25000, 19800, 30200]
+    assert len(rt.wins) == 1
+    win = rt.wins[0]
+    assert win.who == 3 and win.from_who == 2
+    assert win.fu == 40 and win.ten == 5200
+    assert list(win.ten_changes) == [0, 0, -5200, 6200]
 
 
 @requires_engine
 @pytest.mark.parametrize("path", MJLOGS, ids=[os.path.basename(p) for p in MJLOGS])
 def test_engine_replays_corpus(path):
-    """Every round of every bundled game replays through the engine and the
-    engine's regenerated action stream matches Tenhou exactly."""
+    """Every round of every bundled game replays through the engine, the
+    regenerated action stream matches Tenhou, and the engine's recomputed
+    round terminal (scores / wins / yaku / fu / tenpai) matches Tenhou."""
     report = MjlogReplayAgent.from_file(path).validate_with_engine(raise_on_error=False)
     assert report.n_replayed == report.n_rounds, report.summary()
     assert report.n_action_match == report.n_rounds, report.summary()
+    assert report.n_state_match == report.n_state_checked, report.summary()

@@ -1656,6 +1656,15 @@ State::GeneratePastDecisions(const mjxproto::State &proto) noexcept {
   return decisions;
 }
 
+mjxproto::State State::GenerateFinalState(
+    const mjxproto::State &proto) noexcept {
+  State st;
+  SetInitState(proto, st);
+  std::queue<mjxproto::Action> actions = EventsToActions(proto);
+  UpdateByActions(proto, actions, st);
+  return st.proto();
+}
+
 void State::SetInitState(const mjxproto::State &proto, State &state) {
   // Set player ids
   state.state_.mutable_public_observation()->mutable_player_ids()->CopyFrom(

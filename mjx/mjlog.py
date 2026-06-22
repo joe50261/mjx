@@ -846,11 +846,18 @@ class EngineValidationReport:
     n_rounds: int = 0
     n_replayed: int = 0  # rounds the engine replayed without a consistency error
     n_action_match: int = 0  # rounds whose engine action stream matched Tenhou
+    n_state_match: int = 0  # rounds whose engine round-terminal matched Tenhou
+    n_state_checked: int = 0  # rounds that had a terminal to compare
     errors: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.errors and self.n_replayed == self.n_rounds
+        return (
+            not self.errors
+            and self.n_replayed == self.n_rounds
+            and self.n_action_match == self.n_rounds
+            and self.n_state_match == self.n_state_checked
+        )
 
     def summary(self) -> str:
         head = "OK" if self.ok else "issues"
@@ -858,6 +865,8 @@ class EngineValidationReport:
             f"engine replay: {head}",
             f"  rounds replayed: {self.n_replayed}/{self.n_rounds}",
             f"  action streams:  {self.n_action_match}/{self.n_rounds} match Tenhou",
+            f"  round terminals: {self.n_state_match}/{self.n_state_checked} "
+            "match Tenhou (scores / wins / yaku / fu / tenpai)",
         ]
         for e in self.errors:
             lines.append(f"  - {e}")
@@ -998,7 +1007,9 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
         report = EngineValidationReport(n_rounds=len(self.game.rounds))
         for i, r in enumerate(self.game.rounds):
             try:
-                decisions = State(round_to_state_json(r)).past_decisions()
+                state = State(round_to_state_json(r))
+                decisions = state.past_decisions()
+                final = state.replay()  # engine-recomputed full state
             except Exception as exc:  # an engine assertion / inconsistency
                 msg = f"round {i}: engine failed to replay: {exc}"
                 report.errors.append(msg)
@@ -1006,11 +1017,85 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
                     raise MjlogValidationError(msg) from exc
                 continue
             report.n_replayed += 1
+
             engine = self._normalize_rons(self._engine_actions(decisions))
             tenhou = self._normalize_rons(self._tenhou_actions(r))
             if engine == tenhou:
                 report.n_action_match += 1
+
+            # State comparison: the engine independently recomputes the round
+            # terminal (final scores, wins with yaku/fu/points, tenpai/score
+            # changes); check it against the values Tenhou recorded.
+            if r.results:
+                report.n_state_checked += 1
+                # Expected post-round scores: the next round's opening scores,
+                # except after the final round, where the engine (like Tenhou's
+                # owari) awards any leftover riichi stick to the leader.
+                last = r.results[-1]
+                if i == len(self.game.rounds) - 1 and self.game.final_scores:
+                    expected_tens = [s * 100 for s in self.game.final_scores]
+                else:
+                    expected_tens = [
+                        (last.score_before[k] + last.score_delta[k]) * 100 for k in range(4)
+                    ]
+                diffs = self._compare_terminal(final.to_proto().round_terminal, r, expected_tens)
+                if diffs:
+                    msg = f"round {i}: " + "; ".join(diffs)
+                    report.errors.append(msg)
+                    if raise_on_error:
+                        raise MjlogValidationError(msg)
+                else:
+                    report.n_state_match += 1
         return report
+
+    @staticmethod
+    def _compare_terminal(rt, r: RoundLog, expected_tens: List[int]) -> List[str]:
+        """Field-by-field comparison of the engine terminal against Tenhou."""
+        diffs: List[str] = []
+
+        if list(rt.final_score.tens) != expected_tens:
+            diffs.append(f"final scores {list(rt.final_score.tens)} != Tenhou {expected_tens}")
+
+        wins = [res for res in r.results if isinstance(res, Win)]
+        if wins:
+            eng = sorted(rt.wins, key=lambda w: w.who)
+            ten = sorted(wins, key=lambda w: w.who)
+            if len(eng) != len(ten):
+                diffs.append(f"{len(eng)} wins != Tenhou {len(ten)}")
+            else:
+                for ew, tw in zip(eng, ten):
+                    if ew.who != tw.who or ew.from_who != tw.from_who:
+                        diffs.append(
+                            f"win who/from {ew.who}/{ew.from_who} != " f"{tw.who}/{tw.from_who}"
+                        )
+                    if ew.ten != tw.points:
+                        diffs.append(f"win {tw.who} ten {ew.ten} != Tenhou {tw.points}")
+                    # mjx intentionally sets fu=0 for yakuman hands (it is not
+                    # part of the score), so only compare fu for non-yakuman.
+                    if not ew.yakumans and ew.fu != tw.fu:
+                        diffs.append(f"win {tw.who} fu {ew.fu} != Tenhou {tw.fu}")
+                    tyaku = sorted(y for y, _han in tw.yaku)
+                    # Tenhou records yakuman in a separate field we don't parse;
+                    # only compare yaku ids when Tenhou listed regular yaku.
+                    if tyaku and sorted(ew.yakus) != tyaku and not ew.yakumans:
+                        diffs.append(f"win {tw.who} yaku {sorted(ew.yakus)} != Tenhou {tyaku}")
+                    if list(ew.ten_changes) != [d * 100 for d in tw.score_delta]:
+                        diffs.append(
+                            f"win {tw.who} ten_changes {list(ew.ten_changes)} != "
+                            f"Tenhou {[d * 100 for d in tw.score_delta]}"
+                        )
+        else:  # exhaustive / abortive draw
+            draw = r.results[-1]
+            eng_tenpai = sorted(t.who for t in rt.no_winner.tenpais)
+            ten_tenpai = sorted(i for i, t in enumerate(draw.tenpai) if t)
+            if eng_tenpai != ten_tenpai:
+                diffs.append(f"tenpai {eng_tenpai} != Tenhou {ten_tenpai}")
+            if list(rt.no_winner.ten_changes) != [d * 100 for d in draw.score_delta]:
+                diffs.append(
+                    f"draw ten_changes {list(rt.no_winner.ten_changes)} != "
+                    f"Tenhou {[d * 100 for d in draw.score_delta]}"
+                )
+        return diffs
 
     @staticmethod
     def _normalize_rons(

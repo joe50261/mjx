@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-import _mjx  # type: ignore
 from google.protobuf import json_format
 
+import _mjx  # type: ignore
 import mjxproto
 from mjx.action import Action
 from mjx.observation import Observation
@@ -46,6 +46,16 @@ class State:
             (Observation._from_cpp_obj(obs), Action._from_cpp_obj(act))
             for obs, act in self._cpp_obj.past_decisions()
         ]
+
+    def replay(self) -> State:
+        """Replay this state through the engine and return the fully recomputed
+        state, including the round terminal (scores, wins, tenpai).
+
+        Used to validate the engine's state computation against recorded data:
+        build a State from a Tenhou log (wall + events) and compare
+        ``state.replay().to_proto().round_terminal`` with the log.
+        """
+        return State._from_cpp_obj(self._cpp_obj.replay())
 
     def save_svg(self, filename: str, view_idx: int = 0):
         assert filename.endswith(".svg")

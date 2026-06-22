@@ -22,6 +22,10 @@ class State {
   // accessors
   const mjxproto::State& proto() const noexcept;
   std::vector<std::pair<Observation, Action>> past_decisions() const noexcept;
+  // Replays this state through the engine and returns the fully recomputed
+  // state (including the round terminal). Used to validate that the engine's
+  // state computation matches recorded (e.g. Tenhou) data.
+  State replay() const noexcept;
 
  private:
   mjxproto::State proto_{};
