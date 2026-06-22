@@ -11,14 +11,19 @@
 namespace mjx::internal {
 State::State(State::ScoreInfo score_info)
     : State(score_info.player_ids, score_info.game_seed, score_info.round,
-            score_info.honba, score_info.riichi, score_info.tens) {}
+            score_info.honba, score_info.riichi, score_info.tens,
+            score_info.wall) {}
 
 State::State(std::vector<PlayerId> player_ids, std::uint64_t game_seed,
-             int round, int honba, int riichi, std::array<int, 4> tens)
-    : wall_(round, honba, game_seed) {
+             int round, int honba, int riichi, std::array<int, 4> tens,
+             std::vector<Tile> wall)
+    : wall_(wall.empty() ? Wall(round, honba, game_seed)
+                         : Wall(round, std::move(wall))) {
   Assert(std::set<PlayerId>(player_ids.begin(), player_ids.end()).size() ==
          4);  // player_ids should be identical
-  Assert(game_seed != 0 && wall_.game_seed() != 0,
+  // game_seed == 0 is reserved for walls reproduced from human data (e.g. a
+  // Tenhou seed), in which case the wall is supplied directly.
+  Assert(wall_.game_seed() != 0,
          "Seed cannot be zero. round = " + std::to_string(round) +
              ", honba = " + std::to_string(honba));
 

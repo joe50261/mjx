@@ -52,9 +52,12 @@ __all__ = [
     "Decision",
     "DecisionType",
     "ValidationReport",
+    "EngineReplayReport",
+    "EngineRoundResult",
     "MjlogParseError",
     "MjlogValidationError",
     "parse_mjlog",
+    "replay_in_engine",
     "decode_meld",
     "tile_type",
     "is_red_five",
@@ -297,6 +300,9 @@ class MjlogGame:
     rounds: List[RoundLog] = field(default_factory=list)
     final_scores: Optional[List[int]] = None  # units of 100
     final_points: Optional[List[float]] = None  # placement points (uma/oka)
+    # The ``<SHUFFLE seed="...">`` value ("mt19937ar-sha512-n288-base64,<b64>").
+    # Reproduces the exact tile wall Tenhou dealt; used to drive the engine.
+    seed: Optional[str] = None
 
     # -- convenience constructors -------------------------------------------
     @classmethod
@@ -383,7 +389,9 @@ def parse_mjlog(source: str) -> MjlogGame:
                 last_draw[who] = None
             continue
 
-        if tag == "GO":
+        if tag == "SHUFFLE":
+            game.seed = attr.get("seed")
+        elif tag == "GO":
             game.game_type = int(attr.get("type", 0))
         elif tag == "UN" and "n0" in attr:
             for i in range(4):
@@ -740,15 +748,21 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
         for d in self.decisions():
             self._queues[d.who].append(d)
         self._heads: Dict[int, int] = {i: 0 for i in range(4)}
+        # A riichi is logged as one decision but is two actions in mjx (declare,
+        # then discard the riichi tile). After we emit the declaration this holds
+        # the tile the same player must discard next.
+        self._pending_riichi_discard: Dict[int, Optional[int]] = {
+            i: None for i in range(4)
+        }
 
     # -- mjx.Agent interface (requires the native engine) -------------------
     def act(self, observation):  # type: ignore[override]
         """Return the recorded action matching ``observation``.
 
-        Requires the native ``_mjx`` extension.  Forced choices are returned
-        directly; otherwise the player's next recorded positive decision is
-        matched against the legal actions, and a pass/no-op is returned when the
-        player declined an offered call.
+        Requires the native ``_mjx`` extension.  The player's next recorded
+        positive decision is matched against the legal actions and consumed;
+        when nothing matches, a single forced action is taken as-is and an
+        offered-but-declined call becomes a pass/no-op.
         """
         if not _ENGINE_AVAILABLE:
             raise RuntimeError(
@@ -757,10 +771,19 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
             )
 
         legal = observation.legal_actions()
-        if len(legal) == 1:
-            return legal[0]
-
         who = observation.who()
+
+        # Second half of a riichi: discard the declared tile. This belongs to the
+        # already-consumed riichi decision, so it does not advance the queue.
+        pending = self._pending_riichi_discard[who]
+        if pending is not None:
+            match = self._match_tile(
+                legal, pending, (_ActionType.DISCARD, _ActionType.TSUMOGIRI)
+            )
+            if match is not None:
+                self._pending_riichi_discard[who] = None
+                return match
+
         head = self._heads[who]
         queue = self._queues[who]
         if head < len(queue):
@@ -768,9 +791,15 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
             match = self._match(want, legal)
             if match is not None:
                 self._heads[who] = head + 1
+                if want.type is DecisionType.RIICHI:
+                    self._pending_riichi_discard[who] = want.tile
                 return match
 
-        # The player is being offered a call they declined: pass / no-op.
+        # No recorded positive decision applies here: either an env-forced step
+        # (a single legal action, e.g. a forced tsumogiri or a round-terminal
+        # dummy) or a call the player declined (pass / no-op).
+        if len(legal) == 1:
+            return legal[0]
         for action in legal:
             if action.type() == _ActionType.PASS:
                 return action
@@ -778,17 +807,318 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
 
     @staticmethod
     def _match(decision: Decision, legal):
+        """Return the legal action realizing ``decision``, or ``None``.
+
+        Matching is strict: a decision is consumed only when an offered action
+        unambiguously realizes it (a meld's exact ``m`` bit field, or a tile's
+        exact id / type). This is what keeps replay in lock-step -- a loose match
+        could consume a *future* decision against an offered-but-declined call
+        and desync every later turn.
+        """
         target = getattr(_ActionType, _DECISION_TO_ACTION_NAME[decision.type])
         candidates = [a for a in legal if a.type() == target]
         if not candidates:
             return None
+        # Riichi declaration is a single tile-less action (the riichi discard is
+        # emitted separately; see act()).
+        if decision.type is DecisionType.RIICHI:
+            return candidates[0]
+        # Melds: mjx's Open and Tenhou's ``m`` agree on which tile *types* form
+        # the call and on the direction it was called from, but may encode
+        # different *copies* of a tile (e.g. which 3p, or red vs normal five).
+        # So match on (call direction, tile-type multiset) and break ties by
+        # exact-id overlap. The direction matters: the same honor pon can be
+        # offered on two different players' discards of that honor, and only one
+        # is the recorded call.
+        if decision.meld is not None:
+            want_from = decision.meld.m & 0x3  # 0=self,1=right,2=across,3=left
+            want_types = sorted(tile_type(t) for t in decision.meld.tiles)
+            want_ids = set(decision.meld.tiles)
+            best, best_overlap = None, -1
+            for a in candidates:
+                o = a.open()
+                if o is None:
+                    continue
+                if int(o.steal_from()) != want_from:
+                    continue
+                tiles = o.tiles()
+                if sorted(t.type() for t in tiles) != want_types:
+                    continue
+                overlap = len({t.id() for t in tiles} & want_ids)
+                if overlap > best_overlap:
+                    best, best_overlap = a, overlap
+            return best
+        # Tile-bearing decisions (discard / tsumogiri / tsumo / ron): match the
+        # exact tile id (distinguishes red fives), then the tile type. Never
+        # match loosely -- if nothing fits, this offer is not this decision.
         if decision.tile is not None:
+            for a in candidates:
+                tl = a.tile()
+                if tl is not None and tl.id() == decision.tile:
+                    return a
             want_type = tile_type(decision.tile)
             for a in candidates:
-                tile = a.tile()
-                if tile is not None and tile.type() == want_type:
+                tl = a.tile()
+                if tl is not None and tl.type() == want_type:
                     return a
+            return None
         return candidates[0]
+
+    @staticmethod
+    def _match_tile(legal, tile_id: int, types):
+        candidates = [a for a in legal if a.type() in types]
+        for a in candidates:
+            tl = a.tile()
+            if tl is not None and tl.id() == tile_id:
+                return a
+        want_type = tile_type(tile_id)
+        for a in candidates:
+            tl = a.tile()
+            if tl is not None and tl.type() == want_type:
+                return a
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Engine replay validation (驗引擎): drive the native Mjx engine with the
+# reproduced wall + recorded actions and check the *engine's* state computation
+# against the log.  This is distinct from validate_game(), which only checks the
+# log's own self-consistency without an engine.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EngineRoundResult:
+    """Per-round outcome of comparing the engine to the log."""
+
+    round: int
+    honba: int
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+
+@dataclass
+class EngineReplayReport:
+    """The outcome of :func:`replay_in_engine`."""
+
+    n_rounds_log: int = 0
+    n_rounds_engine: int = 0
+    rounds: List[EngineRoundResult] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)  # game-level errors
+    engine_final_scores: Optional[List[int]] = None  # units of 100
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors and all(r.ok for r in self.rounds)
+
+    def summary(self) -> str:
+        head = "OK" if self.ok else f"FAILED ({self._n_errors()} error(s))"
+        lines = [
+            f"engine replay validation: {head}",
+            f"  rounds (log/engine): {self.n_rounds_log} / {self.n_rounds_engine}",
+        ]
+        if self.engine_final_scores is not None:
+            lines.append(
+                "  engine final: "
+                + ", ".join(str(s * 100) for s in self.engine_final_scores)
+            )
+        for err in self.errors:
+            lines.append(f"  - {err}")
+        for r in self.rounds:
+            for err in r.errors:
+                lines.append(f"  - round#{r.round}.{r.honba}: {err}")
+        return "\n".join(lines)
+
+    def _n_errors(self) -> int:
+        return len(self.errors) + sum(len(r.errors) for r in self.rounds)
+
+
+def _tens(score: Dict) -> List[int]:
+    """Length-4 ``tens`` from a protobuf-json ``Score`` (defaults omit zeros)."""
+    t = list(score.get("tens", [])) if score else []
+    return (t + [0, 0, 0, 0])[:4]
+
+
+def _ten_changes(obj: Dict) -> List[int]:
+    t = list(obj.get("tenChanges", [])) if obj else []
+    return (t + [0, 0, 0, 0])[:4]
+
+
+def replay_in_engine(
+    game: MjlogGame, raise_on_error: bool = False
+) -> EngineReplayReport:
+    """Replay ``game`` through :class:`mjx.MjxEnv` and validate the engine.
+
+    Four :class:`MjlogReplayAgent` instances (one per seat) play the recorded
+    actions against each other in the engine.  The wall is reproduced from the
+    game's ``SHUFFLE`` seed (:meth:`MjxEnv.reset_from_tenhou_seed`) so the engine
+    deals exactly the tiles Tenhou dealt; the engine then computes every state
+    transition (draws, melds, riichi, yaku/fu/score, kyotaku, honba) on its own.
+    Each round's engine-computed terminal (final score, win deltas, fu, ten,
+    tenpai payments) is compared against the values recorded in the log.
+
+    Unlike :func:`validate_game`, this exercises the *engine*: a mismatch points
+    at the engine's state computation, not at the log.
+    """
+    if not _ENGINE_AVAILABLE:
+        raise RuntimeError(
+            "replay_in_engine requires the native Mjx engine (_mjx). "
+            "Use validate_game() for engine-independent log validation."
+        )
+    if not game.seed:
+        raise MjlogValidationError(
+            "mjlog has no <SHUFFLE> seed; cannot reproduce the wall"
+        )
+
+    import json
+
+    from mjx.env import MjxEnv
+
+    report = EngineReplayReport(n_rounds_log=len(game.rounds))
+
+    def gerr(msg: str) -> None:
+        report.errors.append(msg)
+        if raise_on_error:
+            raise MjlogValidationError(msg)
+
+    # Seat i (mjlog ``hai{i}`` / dealer of round 0) maps to engine AbsolutePos i.
+    player_ids = ["0", "1", "2", "3"]
+    agents = {pid: MjlogReplayAgent(game) for pid in player_ids}
+    env = MjxEnv(player_ids)
+    obs = env.reset_from_tenhou_seed(game.seed, player_ids)
+
+    captured: List[Dict] = []
+    prev_round_over = False
+    # The recorded game is finite; the bound only guards against a divergence
+    # that would otherwise loop forever.
+    for _ in range(1_000_000):
+        if env.done("game"):
+            break
+        action_dict = {pid: agents[pid].act(o) for pid, o in obs.items()}
+        obs = env.step(action_dict)
+        round_over = env.done("round")
+        if round_over and not prev_round_over:
+            captured.append(json.loads(env.state().to_json()))
+        prev_round_over = round_over
+    else:  # pragma: no cover - divergence guard
+        gerr("engine replay did not terminate (diverged from the log?)")
+
+    report.n_rounds_engine = len(captured)
+    if captured:
+        last = captured[-1].get("roundTerminal", {}).get("finalScore", {})
+        report.engine_final_scores = [t // 100 for t in _tens(last)]
+
+    # A complete game (one that records its closing ``owari``) must reproduce
+    # exactly. Hand-crafted partial logs simply stop early, so for those we only
+    # validate the rounds the log actually contains.
+    if game.final_scores is not None and len(captured) != len(game.rounds):
+        gerr(
+            f"round count mismatch: log has {len(game.rounds)}, "
+            f"engine produced {len(captured)}"
+        )
+
+    for i, mlog in enumerate(game.rounds):
+        rr = EngineRoundResult(round=mlog.round, honba=mlog.honba)
+        report.rounds.append(rr)
+        if i >= len(captured):
+            rr.errors.append("engine produced no terminal for this round")
+            continue
+
+        def rerr(msg: str) -> None:
+            rr.errors.append(msg)
+            if raise_on_error:
+                raise MjlogValidationError(f"round#{mlog.round}.{mlog.honba}: {msg}")
+
+        state = captured[i]
+        init = state.get("publicObservation", {}).get("initScore", {})
+        term = state.get("roundTerminal", {})
+
+        # 1. opening situation the engine reached for this round.
+        if init.get("round", 0) != mlog.round or init.get("honba", 0) != mlog.honba:
+            rerr(
+                f"engine reached round {init.get('round', 0)}."
+                f"{init.get('honba', 0)} != log {mlog.round}.{mlog.honba}"
+            )
+        if init.get("riichi", 0) != mlog.riichi_sticks:
+            rerr(
+                f"init riichi sticks {init.get('riichi', 0)} != "
+                f"log {mlog.riichi_sticks}"
+            )
+        exp_init = [s * 100 for s in mlog.init_scores]
+        if _tens(init) != exp_init:
+            rerr(f"init tens {_tens(init)} != log {exp_init}")
+
+        # 2. result type + per-result figures.
+        log_wins = [r for r in mlog.results if isinstance(r, Win)]
+        log_draws = [r for r in mlog.results if isinstance(r, ExhaustiveDraw)]
+        eng_wins = term.get("wins", [])
+        eng_no_winner = term.get("noWinner")
+
+        if log_wins:
+            if not eng_wins:
+                rerr("log records a win but the engine has no winner")
+            for mw in log_wins:
+                ew = next((w for w in eng_wins if w.get("who", 0) == mw.who), None)
+                if ew is None:
+                    rerr(f"engine missing win for player {mw.who}")
+                    continue
+                if ew.get("fromWho", 0) != mw.from_who:
+                    rerr(
+                        f"win(who={mw.who}) fromWho {ew.get('fromWho', 0)} != "
+                        f"log {mw.from_who}"
+                    )
+                # mjx reports fu = 0 for limit hands (mangan and above), where
+                # fu does not determine the score; Tenhou still records it
+                # cosmetically. Only compare fu for non-limit hands.
+                if mw.limit == 0 and ew.get("fu", 0) != mw.fu:
+                    rerr(f"win(who={mw.who}) fu {ew.get('fu', 0)} != log {mw.fu}")
+                if ew.get("ten", 0) != mw.points:
+                    rerr(
+                        f"win(who={mw.who}) ten {ew.get('ten', 0)} != "
+                        f"log {mw.points}"
+                    )
+                exp_delta = [d * 100 for d in mw.score_delta]
+                if _ten_changes(ew) != exp_delta:
+                    rerr(
+                        f"win(who={mw.who}) ten_changes {_ten_changes(ew)} != "
+                        f"log {exp_delta}"
+                    )
+        elif log_draws:
+            if eng_no_winner is None:
+                rerr("log records an exhaustive/abortive draw but engine has a winner")
+            else:
+                md = log_draws[0]
+                exp_delta = [d * 100 for d in md.score_delta]
+                if _ten_changes(eng_no_winner) != exp_delta:
+                    rerr(
+                        f"draw ten_changes {_ten_changes(eng_no_winner)} != "
+                        f"log {exp_delta}"
+                    )
+                log_tenpai = {i for i, t in enumerate(md.tenpai) if t}
+                eng_tenpai = {
+                    t.get("who", 0) for t in eng_no_winner.get("tenpais", [])
+                }
+                if eng_tenpai != log_tenpai:
+                    rerr(
+                        f"tenpai players {sorted(eng_tenpai)} != "
+                        f"log {sorted(log_tenpai)}"
+                    )
+
+        # 3. running score the engine carried out of the round.
+        final = term.get("finalScore", {})
+        if i + 1 < len(game.rounds):
+            exp_final = [s * 100 for s in game.rounds[i + 1].init_scores]
+        elif game.final_scores is not None:
+            exp_final = [s * 100 for s in game.final_scores]
+        else:
+            exp_final = None
+        if exp_final is not None and _tens(final) != exp_final:
+            rerr(f"final tens {_tens(final)} != log {exp_final}")
+
+    return report
 
 
 def replay_and_validate(source: str, raise_on_error: bool = True) -> ValidationReport:

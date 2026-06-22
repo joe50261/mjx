@@ -21,6 +21,7 @@ from mjx.mjlog import (
     decode_meld,
     is_red_five,
     parse_mjlog,
+    replay_in_engine,
     tile_type,
 )
 
@@ -218,3 +219,75 @@ def test_act_returns_a_legal_action():
             assert a in obs.legal_actions()
             actions[pid] = a
         obs_dict = env.step(actions)
+
+
+# ---------------------------------------------------------------------------
+# Engine replay (驗引擎): drive MjxEnv with the seed-reproduced wall and the
+# recorded actions, then check the ENGINE's state computation against the log.
+# ---------------------------------------------------------------------------
+
+
+@requires_engine
+def test_reset_from_tenhou_seed_reproduces_wall():
+    """The engine deals exactly the tiles Tenhou dealt for the seed."""
+    import json
+
+    from mjx.env import MjxEnv
+
+    game = parse_mjlog(UPLOADED)
+    r0 = game.rounds[0]
+    env = MjxEnv(["0", "1", "2", "3"])
+    env.reset_from_tenhou_seed(game.seed)
+    wall = json.loads(env.state().to_json())["hiddenState"]["wall"]
+    # wall[52] is the dealer's first draw; wall[130] is the dora indicator.
+    first_draw = next(e.tile for e in r0.events if e.type is DecisionType.DRAW)
+    assert wall[52] == first_draw
+    assert wall[130] == r0.dora_indicators[0]
+
+
+@requires_engine
+def test_replay_in_engine_uploaded_game():
+    """Four MjlogReplayAgents reproduce the whole uploaded hanchan in-engine."""
+    game = parse_mjlog(UPLOADED)
+    report = replay_in_engine(game, raise_on_error=False)
+    assert report.ok, report.summary()
+    assert report.n_rounds_log == report.n_rounds_engine == 10
+    # The engine independently recomputes the closing scores.
+    assert report.engine_final_scores == game.final_scores
+
+
+_COMPLETE = [p for p in MJLOGS if parse_mjlog(p).final_scores is not None]
+
+
+@requires_engine
+@pytest.mark.parametrize("path", _COMPLETE, ids=[os.path.basename(p) for p in _COMPLETE])
+def test_replay_in_engine_corpus(path):
+    """Every complete game in the corpus replays exactly through the engine."""
+    game = parse_mjlog(path)
+    if game.seed is None:
+        pytest.skip("log has no SHUFFLE seed")
+    report = replay_in_engine(game, raise_on_error=False)
+    assert report.ok, report.summary()
+
+
+@requires_engine
+def test_replay_in_engine_requires_seed():
+    game = parse_mjlog(UPLOADED)
+    game.seed = None
+    with pytest.raises(MjlogValidationError):
+        replay_in_engine(game, raise_on_error=False)
+
+
+@requires_engine
+def test_replay_in_engine_detects_engine_mismatch():
+    """If the log claims a score the engine does not compute, replay flags it."""
+    game = parse_mjlog(UPLOADED)
+    # Tamper a win's recorded points so the engine's computation disagrees.
+    for r in game.rounds:
+        for res in r.results:
+            if isinstance(res, Win):
+                res.score_delta = [d + 1 for d in res.score_delta]
+                report = replay_in_engine(game, raise_on_error=False)
+                assert not report.ok
+                return
+    pytest.skip("no win to tamper")

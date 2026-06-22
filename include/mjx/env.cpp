@@ -39,6 +39,36 @@ std::unordered_map<PlayerId, Observation> MjxEnv::Reset(
   return Observe();
 }
 
+namespace {
+std::vector<internal::Tile> TilesFromIds(const std::vector<int>& ids) {
+  std::vector<internal::Tile> tiles;
+  tiles.reserve(ids.size());
+  for (int id : ids) tiles.emplace_back(static_cast<internal::TileId>(id));
+  return tiles;
+}
+}  // namespace
+
+std::unordered_map<PlayerId, Observation> MjxEnv::ResetTenhou(
+    const std::string& seed_str,
+    std::optional<std::vector<PlayerId>> dealer_order) noexcept {
+  // seating order: as given, or natural player order (no shuffle for replay)
+  std::vector<PlayerId> seats =
+      dealer_order ? dealer_order.value() : player_ids_;
+  for (const auto& player_id : seats)
+    assert(std::count(player_ids_.begin(), player_ids_.end(), player_id) == 1);
+
+  tenhou_wall_ = std::make_unique<internal::TenhouWall>(seed_str);
+  tenhou_kyoku_ = 0;
+
+  // game_seed = 0 signals "wall supplied directly" (see internal::State).
+  state_ = internal::State(mjx::internal::State::ScoreInfo{
+      seats, /*game_seed=*/0, /*round=*/0, /*honba=*/0, /*riichi=*/0,
+      /*tens=*/{25000, 25000, 25000, 25000},
+      /*wall=*/TilesFromIds(tenhou_wall_->GetWall(0))});
+
+  return Observe();
+}
+
 std::unordered_map<PlayerId, Observation> MjxEnv::Observe() const noexcept {
   std::unordered_map<PlayerId, Observation> observations;
   auto internal_observations = state_.CreateObservations();
@@ -53,6 +83,12 @@ std::unordered_map<PlayerId, Observation> MjxEnv::Step(
 
   if (state_.IsRoundOver() && !state_.IsGameOver()) {
     auto next_state_info = state_.Next();
+    if (tenhou_wall_) {
+      // Each hand consumes exactly one kyoku of the Tenhou MT stream, and a
+      // round transition happens exactly once per hand, so advance in lockstep.
+      next_state_info.wall =
+          TilesFromIds(tenhou_wall_->GetWall(++tenhou_kyoku_));
+    }
     state_ = mjx::internal::State(next_state_info);
     return Observe();
   }

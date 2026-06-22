@@ -32,6 +32,13 @@ else()
 endif()
 message(STATUS "Include Boost_INCLUDE_DIRS=${Boost_INCLUDE_DIRS}")
 
+####################################################################################
+# OpenSSL (used by TenhouWall to reproduce Tenhou's SHA512-based tile wall)
+####################################################################################
+
+find_package(OpenSSL REQUIRED)
+message(STATUS "Include OPENSSL_INCLUDE_DIR=${OPENSSL_INCLUDE_DIR}")
+
 ###################################################################################
 # gRPC
 ####################################################################################
@@ -150,7 +157,7 @@ add_library(
   ${mjx_proto_srcs} ${mjx_grpc_srcs} ${mjx_proto_hdrs} ${mjx_grpc_hdrs}
 )
 target_include_directories(mjx PUBLIC ${Boost_INCLUDE_DIRS} ${MJX_INCLUDE_DIR})
-target_link_libraries(mjx PUBLIC ${_REFLECTION} ${_GRPC_GRPCPP} ${_PROTOBUF_LIBPROTOBUF})
+target_link_libraries(mjx PUBLIC ${_REFLECTION} ${_GRPC_GRPCPP} ${_PROTOBUF_LIBPROTOBUF} OpenSSL::Crypto)
 target_compile_definitions(mjx PUBLIC WIN_CACHE_DIR="${MJX_INCLUDE_DIR}/mjx/cache")
 
 ####################################################################################

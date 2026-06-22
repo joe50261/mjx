@@ -1,9 +1,11 @@
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 #include "mjx/action.h"
 #include "mjx/agent.h"
 #include "mjx/internal/state.h"
+#include "mjx/internal/tenhou_wall.h"
 #include "mjx/observation.h"
 #include "mjx/seed_generator.h"
 #include "mjx/state.h"
@@ -18,6 +20,15 @@ class MjxEnv {
   explicit MjxEnv(std::vector<PlayerId> player_ids);
   std::unordered_map<PlayerId, Observation> Reset(
       std::optional<std::uint64_t> seed = std::nullopt,
+      std::optional<std::vector<PlayerId>> dealer_order =
+          std::nullopt) noexcept;
+  // Resets the env using a wall reproduced from a Tenhou game's SHUFFLE seed
+  // (e.g. "mt19937ar-sha512-n288-base64,..."). Each subsequent round draws the
+  // next kyoku's wall from the same seed, so the engine deals exactly the tiles
+  // Tenhou dealt. `dealer_order` (defaults to player_ids in natural order) sets
+  // the seating; no shuffling is applied.
+  std::unordered_map<PlayerId, Observation> ResetTenhou(
+      const std::string& seed_str,
       std::optional<std::vector<PlayerId>> dealer_order =
           std::nullopt) noexcept;
   std::unordered_map<PlayerId, Observation> Step(
@@ -39,6 +50,12 @@ class MjxEnv {
       internal::GameSeed::CreateRandomGameSeedGenerator();
   internal::State state_{};
   const std::vector<PlayerId> player_ids_;
+
+  // Set only in Tenhou-seed replay mode (see ResetTenhou). When set, each round
+  // transition deals the next kyoku's wall instead of generating one from a
+  // game seed.
+  std::unique_ptr<internal::TenhouWall> tenhou_wall_;
+  int tenhou_kyoku_ = 0;
 
   std::unordered_map<PlayerId, Observation> Observe() const noexcept;
 };

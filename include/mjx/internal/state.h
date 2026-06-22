@@ -41,6 +41,9 @@ class State {
     int honba = 0;
     int riichi = 0;
     std::array<int, 4> tens = {25000, 25000, 25000, 25000};
+    // If non-empty, this wall (e.g. reproduced from a Tenhou seed) is used
+    // instead of generating one from game_seed.
+    std::vector<Tile> wall = {};
   };
   State() = default;
   explicit State(ScoreInfo score_info);
@@ -100,7 +103,8 @@ class State {
   explicit State(std::vector<PlayerId> player_ids,  // 起家, ..., ラス親
                  std::uint64_t game_seed = 0, int round = 0, int honba = 0,
                  int riichi = 0,
-                 std::array<int, 4> tens = {25000, 25000, 25000, 25000});
+                 std::array<int, 4> tens = {25000, 25000, 25000, 25000},
+                 std::vector<Tile> wall = {});
 
   // Internal structures
   struct Player {
