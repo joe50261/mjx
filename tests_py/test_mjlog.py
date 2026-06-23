@@ -8,9 +8,9 @@ import os
 
 import pytest
 
+from mjx import MjlogReplayAgent
 from mjx.mjlog import (
     DecisionType,
-    MjlogReplayAgent,
     Win,
     decode_meld,
     is_red_five,

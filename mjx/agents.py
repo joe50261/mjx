@@ -1,11 +1,12 @@
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import _mjx  # type: ignore
 
 from mjx.action import Action
 from mjx.const import ActionType
 from mjx.env import MjxEnv
+from mjx.mjlog import Decision, DecisionType, MjlogGame, parse_mjlog, tile_type
 from mjx.observation import Observation
 from mjx.visualizer.selector import Selector
 
@@ -156,6 +157,156 @@ class HumanControlAgent(Agent):  # type: ignore
         )
 
 
+class MjlogReplayAgent(Agent):
+    """Replays a recorded Tenhou ``.mjlog``: ``act`` returns the action the log
+    recorded for that seat. Four of them in :class:`mjx.MjxEnv` (reset from the
+    game's seed, so the engine deals Tenhou's wall) reproduce the game and let
+    the engine recompute every state transition. The log is parsed by
+    ``mjx.mjlog``; this class is only the agent contract.
+
+        agent = MjlogReplayAgent.from_file("game.mjlog")
+        action = agent.act(observation)
+    """
+
+    _DECISION_TO_ACTION = {
+        DecisionType.DISCARD: ActionType.DISCARD,
+        DecisionType.TSUMOGIRI: ActionType.TSUMOGIRI,
+        DecisionType.RIICHI: ActionType.RIICHI,
+        DecisionType.CHI: ActionType.CHI,
+        DecisionType.PON: ActionType.PON,
+        DecisionType.OPEN_KAN: ActionType.OPEN_KAN,
+        DecisionType.CLOSED_KAN: ActionType.CLOSED_KAN,
+        DecisionType.ADDED_KAN: ActionType.ADDED_KAN,
+        DecisionType.TSUMO: ActionType.TSUMO,
+        DecisionType.RON: ActionType.RON,
+        DecisionType.ABORTIVE_DRAW_NINE_TERMINALS: ActionType.ABORTIVE_DRAW_NINE_TERMINALS,
+    }
+
+    def __init__(self, game: MjlogGame) -> None:
+        super().__init__()
+        self.game = game
+        # Per-seat FIFO of that seat's recorded positive decisions, with a cursor.
+        self._queues: Dict[int, List[Decision]] = {i: [] for i in range(4)}
+        for d in self.decisions():
+            self._queues[d.who].append(d)
+        self._heads: Dict[int, int] = {i: 0 for i in range(4)}
+        # A riichi is one logged decision but two mjx actions (declare, then
+        # discard the riichi tile); this holds the seat's pending riichi discard.
+        self._pending_riichi_discard: Dict[int, Optional[int]] = {i: None for i in range(4)}
+
+    @classmethod
+    def from_file(cls, path: str) -> "MjlogReplayAgent":
+        return cls(parse_mjlog(path))
+
+    @classmethod
+    def from_str(cls, xml: str) -> "MjlogReplayAgent":
+        return cls(parse_mjlog(xml))
+
+    def decisions(self) -> List[Decision]:
+        """Every recorded decision across the whole game, in order."""
+        return [d for r in self.game.rounds for d in r.decisions]
+
+    def act(self, observation: Observation) -> Action:
+        return Action._from_cpp_obj(self._act(observation._cpp_obj))
+
+    def _act(self, observation: _mjx.Observation) -> _mjx.Action:  # type: ignore
+        legal = observation.legal_actions()
+        who = observation.who()
+
+        # Second half of a riichi: discard the declared tile. It belongs to the
+        # already-consumed riichi decision, so it does not advance the cursor.
+        pending = self._pending_riichi_discard[who]
+        if pending is not None:
+            match = self._match_tile(legal, pending, (ActionType.DISCARD, ActionType.TSUMOGIRI))
+            if match is not None:
+                self._pending_riichi_discard[who] = None
+                return match
+
+        head = self._heads[who]
+        queue = self._queues[who]
+        if head < len(queue):
+            want = queue[head]
+            match = self._match(want, legal)
+            if match is not None:
+                self._heads[who] = head + 1
+                if want.type is DecisionType.RIICHI:
+                    self._pending_riichi_discard[who] = want.tile
+                return match
+
+        # No recorded decision applies: an env-forced step (single legal action,
+        # e.g. a forced tsumogiri or a round-terminal dummy) or a declined call.
+        if len(legal) == 1:
+            return legal[0]
+        for action in legal:
+            if action.type() == ActionType.PASS:
+                return action
+        return legal[0]
+
+    @classmethod
+    def _match(cls, decision: Decision, legal):
+        """The legal action that unambiguously realizes ``decision``, or ``None``.
+
+        Matching is strict so replay stays in lock-step: a loose match could
+        consume a *future* decision against an offered-but-declined call and
+        desync every later turn.
+        """
+        target = cls._DECISION_TO_ACTION[decision.type]
+        candidates = [a for a in legal if a.type() == target]
+        if not candidates:
+            return None
+        # Riichi declaration is a single tile-less action (the discard follows;
+        # see _act).
+        if decision.type is DecisionType.RIICHI:
+            return candidates[0]
+        # Melds: mjx's Open and Tenhou's ``m`` agree on the tile *types* and the
+        # call direction but may encode different tile *copies* (which 3p, red vs
+        # normal five). Match on (direction, tile-type multiset) and break ties by
+        # exact-id overlap -- the same honor pon can be offered on two players'
+        # discards of that honor, and only one is the recorded call.
+        if decision.meld is not None:
+            want_from = decision.meld.m & 0x3  # 0=self, 1=right, 2=across, 3=left
+            want_types = sorted(tile_type(t) for t in decision.meld.tiles)
+            want_ids = set(decision.meld.tiles)
+            best, best_overlap = None, -1
+            for a in candidates:
+                bit = a._open()
+                if bit is None or _mjx.Open.steal_from(bit) != want_from:
+                    continue
+                tiles = _mjx.Open.tiles(bit)
+                if sorted(tile_type(t) for t in tiles) != want_types:
+                    continue
+                overlap = len(set(tiles) & want_ids)
+                if overlap > best_overlap:
+                    best, best_overlap = a, overlap
+            return best
+        # Tile-bearing decisions (discard / tsumogiri / tsumo / ron): exact tile
+        # id (distinguishes red fives), then tile type; never loosely.
+        if decision.tile is not None:
+            for a in candidates:
+                if a.tile() == decision.tile:
+                    return a
+            want_type = tile_type(decision.tile)
+            for a in candidates:
+                tile = a.tile()
+                if tile is not None and tile_type(tile) == want_type:
+                    return a
+            return None
+        return candidates[0]
+
+    @staticmethod
+    def _match_tile(legal, tile_id: int, types):
+        candidates = [a for a in legal if a.type() in types]
+        for a in candidates:
+            if a.tile() == tile_id:
+                return a
+        want_type = tile_type(tile_id)
+        for a in candidates:
+            tile = a.tile()
+            if tile is not None and tile_type(tile) == want_type:
+                return a
+        return None
+
+
 def validate_agent(agent: Agent, n_games=1, use_batch=False):
     env = MjxEnv()
     for i in range(n_games):
@@ -167,8 +318,3 @@ def validate_agent(agent: Agent, n_games=1, use_batch=False):
                 assert action in obs.legal_actions()
                 action_dict[player_id] = action
             obs_dict = env.step(action_dict)
-
-
-# Re-exported so that ``MjlogReplayAgent`` lives alongside the other agents
-# (see ``mjx.mjlog``).
-from mjx.mjlog import MjlogReplayAgent  # noqa: E402,F401
