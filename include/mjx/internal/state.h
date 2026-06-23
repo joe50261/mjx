@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -41,9 +42,13 @@ class State {
     int honba = 0;
     int riichi = 0;
     std::array<int, 4> tens = {25000, 25000, 25000, 25000};
-    // If non-empty, this wall (e.g. reproduced from a Tenhou seed) is used
-    // instead of generating one from game_seed.
-    std::vector<Tile> wall = {};
+    // Optional pluggable wall source, indexed by deal number (kyoku). When set,
+    // each round's wall is taken from here instead of being generated from
+    // game_seed, and `kyoku` advances with State::Next(). Lets a recorded wall
+    // (e.g. one reproduced from a Tenhou seed) drive the normal play loop
+    // without the engine knowing anything Tenhou-specific.
+    std::function<std::vector<Tile>(int kyoku)> wall_provider = nullptr;
+    int kyoku = 0;
   };
   State() = default;
   explicit State(ScoreInfo score_info);
@@ -104,7 +109,8 @@ class State {
                  std::uint64_t game_seed = 0, int round = 0, int honba = 0,
                  int riichi = 0,
                  std::array<int, 4> tens = {25000, 25000, 25000, 25000},
-                 std::vector<Tile> wall = {});
+                 std::function<std::vector<Tile>(int)> wall_provider = nullptr,
+                 int kyoku = 0);
 
   // Internal structures
   struct Player {
@@ -135,6 +141,11 @@ class State {
                                 // serialization when round is not finished.
   // containers
   Wall wall_;
+  // Carried across rounds so State::Next() can keep drawing successive walls
+  // from the same source (see ScoreInfo::wall_provider). Empty for ordinary
+  // game-seed play.
+  std::function<std::vector<Tile>(int)> wall_provider_;
+  int kyoku_ = 0;
   std::array<Player, 4> players_;
 
   // accessors

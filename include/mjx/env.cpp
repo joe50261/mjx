@@ -57,14 +57,21 @@ std::unordered_map<PlayerId, Observation> MjxEnv::ResetTenhou(
   for (const auto& player_id : seats)
     assert(std::count(player_ids_.begin(), player_ids_.end(), player_id) == 1);
 
-  tenhou_wall_ = std::make_unique<internal::TenhouWall>(seed_str);
-  tenhou_kyoku_ = 0;
-
-  // game_seed = 0 signals "wall supplied directly" (see internal::State).
+  // The Tenhou wall is just a wall source: it turns the game's SHUFFLE seed into
+  // each kyoku's 136 tiles. Handing it to State as a wall_provider lets the
+  // ordinary play loop deal Tenhou's tiles -- State::Next() advances the kyoku
+  // in lockstep with the rounds, so neither the env's Step nor the engine needs
+  // any Tenhou-specific per-round logic.
+  auto tenhou_wall = std::make_shared<internal::TenhouWall>(seed_str);
+  // game_seed = 0 because the wall comes from the provider, not a game seed.
   state_ = internal::State(mjx::internal::State::ScoreInfo{
       seats, /*game_seed=*/0, /*round=*/0, /*honba=*/0, /*riichi=*/0,
       /*tens=*/{25000, 25000, 25000, 25000},
-      /*wall=*/TilesFromIds(tenhou_wall_->GetWall(0))});
+      /*wall_provider=*/
+      [tenhou_wall](int kyoku) {
+        return TilesFromIds(tenhou_wall->GetWall(kyoku));
+      },
+      /*kyoku=*/0});
 
   return Observe();
 }
@@ -82,14 +89,10 @@ std::unordered_map<PlayerId, Observation> MjxEnv::Step(
   std::unordered_map<PlayerId, Observation> observations;
 
   if (state_.IsRoundOver() && !state_.IsGameOver()) {
-    auto next_state_info = state_.Next();
-    if (tenhou_wall_) {
-      // Each hand consumes exactly one kyoku of the Tenhou MT stream, and a
-      // round transition happens exactly once per hand, so advance in lockstep.
-      next_state_info.wall =
-          TilesFromIds(tenhou_wall_->GetWall(++tenhou_kyoku_));
-    }
-    state_ = mjx::internal::State(next_state_info);
+    // State::Next() already carries the wall_provider forward (and advances the
+    // kyoku), so a Tenhou-seed game keeps dealing the right wall with no special
+    // casing here.
+    state_ = mjx::internal::State(state_.Next());
     return Observe();
   }
 

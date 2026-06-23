@@ -12,17 +12,20 @@ namespace mjx::internal {
 State::State(State::ScoreInfo score_info)
     : State(score_info.player_ids, score_info.game_seed, score_info.round,
             score_info.honba, score_info.riichi, score_info.tens,
-            score_info.wall) {}
+            score_info.wall_provider, score_info.kyoku) {}
 
 State::State(std::vector<PlayerId> player_ids, std::uint64_t game_seed,
              int round, int honba, int riichi, std::array<int, 4> tens,
-             std::vector<Tile> wall)
-    : wall_(wall.empty() ? Wall(round, honba, game_seed)
-                         : Wall(round, std::move(wall))) {
+             std::function<std::vector<Tile>(int)> wall_provider, int kyoku)
+    : wall_(wall_provider ? Wall(round, wall_provider(kyoku))
+                          : Wall(round, honba, game_seed)),
+      wall_provider_(std::move(wall_provider)),
+      kyoku_(kyoku) {
   Assert(std::set<PlayerId>(player_ids.begin(), player_ids.end()).size() ==
          4);  // player_ids should be identical
-  // game_seed == 0 is reserved for walls reproduced from human data (e.g. a
-  // Tenhou seed), in which case the wall is supplied directly.
+  // game_seed == 0 is reserved for walls supplied via a wall_provider (e.g. one
+  // reproduced from a Tenhou seed); in that case the Wall carries a sentinel
+  // non-zero seed, so this check still rejects an accidental zero game seed.
   Assert(wall_.game_seed() != 0,
          "Seed cannot be zero. round = " + std::to_string(round) +
              ", honba = " + std::to_string(honba));
@@ -897,11 +900,13 @@ State::ScoreInfo State::Next() const {
              mjxproto::EVENT_TYPE_ABORTIVE_DRAW_FOUR_WINDS}) ||
         is_dealer_tenpai) {
       return ScoreInfo{player_ids,  game_seed(), round(),
-                       honba() + 1, riichi(),    tens()};
+                       honba() + 1, riichi(),    tens(),
+                       wall_provider_, kyoku_ + 1};
     } else {
       Assert(round() + 1 < 12, "round should be < 12. State:\n" + ToJson());
       return ScoreInfo{player_ids,  game_seed(), round() + 1,
-                       honba() + 1, riichi(),    tens()};
+                       honba() + 1, riichi(),    tens(),
+                       wall_provider_, kyoku_ + 1};
     }
   } else {
     bool is_dealer_win = std::any_of(
@@ -910,11 +915,13 @@ State::ScoreInfo State::Next() const {
         [&](const auto x) { return AbsolutePos(x.who()) == dealer(); });
     if (is_dealer_win) {
       return ScoreInfo{player_ids,  game_seed(), round(),
-                       honba() + 1, riichi(),    tens()};
+                       honba() + 1, riichi(),    tens(),
+                       wall_provider_, kyoku_ + 1};
     } else {
       Assert(round() + 1 < 12, "round should be < 12. State:\n" + ToJson());
       return ScoreInfo{player_ids, game_seed(), round() + 1,
-                       0,          riichi(),    tens()};
+                       0,          riichi(),    tens(),
+                       wall_provider_, kyoku_ + 1};
     }
   }
 }

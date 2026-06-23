@@ -51,12 +51,6 @@ class MjxEnv {
   internal::State state_{};
   const std::vector<PlayerId> player_ids_;
 
-  // Set only in Tenhou-seed replay mode (see ResetTenhou). When set, each round
-  // transition deals the next kyoku's wall instead of generating one from a
-  // game seed.
-  std::unique_ptr<internal::TenhouWall> tenhou_wall_;
-  int tenhou_kyoku_ = 0;
-
   std::unordered_map<PlayerId, Observation> Observe() const noexcept;
 };
 
