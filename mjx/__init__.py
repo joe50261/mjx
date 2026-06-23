@@ -1,5 +1,5 @@
 from mjx.action import Action
-from mjx.agents import Agent
+from mjx.agents import Agent, MjlogReplayAgent
 from mjx.const import ActionType, EventType, TileType
 from mjx.env import MjxEnv, run
 from mjx.event import Event
@@ -8,6 +8,9 @@ from mjx.observation import Observation
 from mjx.open import Open
 from mjx.state import State
 from mjx.tile import Tile
+
+# Tenhou .mjlog reader (parser + data model).
+from mjx import mjlog
 
 __all__ = [
     "Action",
@@ -23,4 +26,6 @@ __all__ = [
     "ActionType",
     "EventType",
     "TileType",
+    "mjlog",
+    "MjlogReplayAgent",
 ]

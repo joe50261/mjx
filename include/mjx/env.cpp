@@ -39,6 +39,43 @@ std::unordered_map<PlayerId, Observation> MjxEnv::Reset(
   return Observe();
 }
 
+namespace {
+std::vector<internal::Tile> TilesFromIds(const std::vector<int>& ids) {
+  std::vector<internal::Tile> tiles;
+  tiles.reserve(ids.size());
+  for (int id : ids) tiles.emplace_back(static_cast<internal::TileId>(id));
+  return tiles;
+}
+}  // namespace
+
+std::unordered_map<PlayerId, Observation> MjxEnv::ResetTenhou(
+    const std::string& seed_str,
+    std::optional<std::vector<PlayerId>> dealer_order) noexcept {
+  // seating order: as given, or natural player order (no shuffle for replay)
+  std::vector<PlayerId> seats =
+      dealer_order ? dealer_order.value() : player_ids_;
+  for (const auto& player_id : seats)
+    assert(std::count(player_ids_.begin(), player_ids_.end(), player_id) == 1);
+
+  // The Tenhou wall is just a wall source: it turns the game's SHUFFLE seed into
+  // each kyoku's 136 tiles. Handing it to State as a wall_provider lets the
+  // ordinary play loop deal Tenhou's tiles -- State::Next() advances the kyoku
+  // in lockstep with the rounds, so neither the env's Step nor the engine needs
+  // any Tenhou-specific per-round logic.
+  auto tenhou_wall = std::make_shared<internal::TenhouWall>(seed_str);
+  // game_seed = 0 because the wall comes from the provider, not a game seed.
+  state_ = internal::State(mjx::internal::State::ScoreInfo{
+      seats, /*game_seed=*/0, /*round=*/0, /*honba=*/0, /*riichi=*/0,
+      /*tens=*/{25000, 25000, 25000, 25000},
+      /*wall_provider=*/
+      [tenhou_wall](int kyoku) {
+        return TilesFromIds(tenhou_wall->GetWall(kyoku));
+      },
+      /*kyoku=*/0});
+
+  return Observe();
+}
+
 std::unordered_map<PlayerId, Observation> MjxEnv::Observe() const noexcept {
   std::unordered_map<PlayerId, Observation> observations;
   auto internal_observations = state_.CreateObservations();
@@ -52,8 +89,10 @@ std::unordered_map<PlayerId, Observation> MjxEnv::Step(
   std::unordered_map<PlayerId, Observation> observations;
 
   if (state_.IsRoundOver() && !state_.IsGameOver()) {
-    auto next_state_info = state_.Next();
-    state_ = mjx::internal::State(next_state_info);
+    // State::Next() already carries the wall_provider forward (and advances the
+    // kyoku), so a Tenhou-seed game keeps dealing the right wall with no special
+    // casing here.
+    state_ = mjx::internal::State(state_.Next());
     return Observe();
   }
 

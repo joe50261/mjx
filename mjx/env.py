@@ -22,6 +22,20 @@ class MjxEnv:
         cpp_obs_dict: Dict[str, _mjx.Observation] = self._env.reset(seed, dealer_order)  # type: ignore
         return {k: Observation._from_cpp_obj(v) for k, v in cpp_obs_dict.items()}
 
+    def reset_from_tenhou_seed(
+        self, seed_str: str, dealer_order: Optional[List[str]] = None
+    ) -> Dict[str, Observation]:
+        """Reset using a wall reproduced from a Tenhou game's SHUFFLE seed.
+
+        ``seed_str`` is the value of the ``<SHUFFLE seed="...">`` tag in a Tenhou
+        mjlog (``"mt19937ar-sha512-n288-base64,<base64>"``). Each round draws the
+        next kyoku's wall from the same seed, so the engine deals exactly the
+        tiles Tenhou dealt. ``dealer_order`` sets the seating (East, South, West,
+        North); when omitted the players keep their natural order with no shuffle.
+        """
+        cpp_obs_dict: Dict[str, _mjx.Observation] = self._env.reset_tenhou(seed_str, dealer_order)  # type: ignore
+        return {k: Observation._from_cpp_obj(v) for k, v in cpp_obs_dict.items()}
+
     def step(self, aciton_dict: Dict[str, Action]) -> Dict[str, Observation]:
         cpp_action_dict: Dict[str, _mjx.Action] = {k: v._cpp_obj for k, v in aciton_dict.items()}  # type: ignore
         cpp_obs_dict: Dict[str, _mjx.Observation] = self._env.step(cpp_action_dict)  # type: ignore

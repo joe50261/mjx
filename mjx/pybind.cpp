@@ -130,6 +130,7 @@ PYBIND11_MODULE(_mjx, m) {
   py::class_<mjx::MjxEnv>(m, "MjxEnv")
       .def(py::init<std::vector<mjx::PlayerId>>())
       .def("reset", &mjx::MjxEnv::Reset)
+      .def("reset_tenhou", &mjx::MjxEnv::ResetTenhou)
       .def("step", &mjx::MjxEnv::Step)
       .def("done", &mjx::MjxEnv::Done)
       .def("rewards", &mjx::MjxEnv::Rewards)
