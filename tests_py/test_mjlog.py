@@ -1,9 +1,9 @@
 """Tests for :mod:`mjx.mjlog`.
 
-The parser and the log self-consistency validator are pure-Python and run
-without the native ``_mjx`` extension. ``MjlogReplayAgent`` is a thin
-scripted-replay agent; its agent-contract tests need the engine and are
-skipped when it is not built.
+The parser is pure-Python and runs without the native ``_mjx`` extension.
+``MjlogReplayAgent`` is a thin scripted-replay agent; the tests that drive it
+(and check the engine's state computation) need the engine and are skipped when
+it is not built.
 """
 
 import glob
@@ -14,9 +14,7 @@ import pytest
 import mjx.mjlog as _m
 from mjx.mjlog import (
     DecisionType,
-    MjlogGame,
     MjlogReplayAgent,
-    MjlogValidationError,
     Win,
     decode_meld,
     is_red_five,
@@ -121,43 +119,6 @@ def test_events_include_draws():
         draws = [e for e in r.events if e.type is DecisionType.DRAW]
         assert draws
         assert len(r.decisions) == len(r.events) - len(draws)
-
-
-# ---------------------------------------------------------------------------
-# Log self-consistency (validates the LOG, treating Tenhou as the oracle)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("path", MJLOGS, ids=[os.path.basename(p) for p in MJLOGS])
-def test_validate_corpus(path):
-    report = parse_mjlog(path).validate(raise_on_error=False)
-    assert report.ok, report.summary()
-
-
-def test_validate_uploaded_details():
-    report = MjlogGame.from_file(UPLOADED).validate()
-    assert report.ok
-    assert report.n_rounds == 10
-    assert report.reached_game_end
-    assert report.final_scores == [170, 170, 247, 413]
-    assert sum(report.final_scores) * 100 == 100000
-
-
-def test_partial_logs_validate_without_owari():
-    partial = [p for p in MJLOGS if "no-game-end" in p or "no-round-end" in p]
-    assert partial
-    for path in partial:
-        report = parse_mjlog(path).validate(raise_on_error=False)
-        assert report.ok, report.summary()
-        assert not report.reached_game_end
-
-
-def test_validation_error_is_raised_on_tampered_log():
-    game = parse_mjlog(UPLOADED)
-    game.rounds[1].init_scores = [999, 0, 0, 0]
-    with pytest.raises(MjlogValidationError):
-        game.validate(raise_on_error=True)
-    assert not game.validate(raise_on_error=False).ok
 
 
 # ---------------------------------------------------------------------------

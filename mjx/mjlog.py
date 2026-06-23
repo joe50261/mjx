@@ -1,20 +1,21 @@
-"""Replay and validation for Tenhou ``.mjlog`` game logs.
+"""Tenhou ``.mjlog`` reader and a scripted-replay agent.
 
 This module provides a self-contained (standard-library only) reader for
-Tenhou's ``mjlog`` XML format together with a replay state machine and a
-validator that re-derives every score transition of a game and checks it
-against the values recorded in the log.  It is used by
-:class:`MjlogReplayAgent` (see below) to replay a recorded game through
-:class:`mjx.MjxEnv`, but the parsing / validation layer does **not** depend on
-the native ``_mjx`` extension, so it can be used to verify that the state
-(score / kyotaku / honba / hand) bookkeeping is computed correctly even when
-Mjx is not built.
+Tenhou's ``mjlog`` XML format and the data model for a parsed game.  It needs no
+native build.
+
+Its companion :class:`MjlogReplayAgent` is an ordinary :class:`mjx.Agent`:
+``act(observation)`` returns the action the log records for that seat.  To Mjx,
+four of them are just four agents playing -- run through the standard
+:class:`mjx.MjxEnv` loop on a wall dealt from the game's seed
+(:meth:`mjx.MjxEnv.reset_from_tenhou_seed`), they reproduce the recorded game and
+the engine recomputes every state transition itself.
 
 The Tenhou ``mjlog`` format
 ---------------------------
 A game is a flat list of XML elements::
 
-    <SHUFFLE seed=".."/>          # RNG seed (unused for replay; draws are explicit)
+    <SHUFFLE seed=".."/>          # RNG seed (reproduces the exact tile wall)
     <GO type=".." lobby=".."/>    # game-type flags
     <UN n0=".." .. dan=".." rate=".." sx=".."/>   # players (%-encoded names)
     <TAIKYOKU oya="0"/>           # initial dealer
@@ -51,9 +52,7 @@ __all__ = [
     "ExhaustiveDraw",
     "Decision",
     "DecisionType",
-    "ValidationReport",
     "MjlogParseError",
-    "MjlogValidationError",
     "parse_mjlog",
     "decode_meld",
     "tile_type",
@@ -100,10 +99,6 @@ def tile_name(tile_id: int) -> str:
 
 class MjlogParseError(ValueError):
     """Raised when an ``mjlog`` document cannot be parsed."""
-
-
-class MjlogValidationError(AssertionError):
-    """Raised when a replayed game does not match the recorded state."""
 
 
 # ---------------------------------------------------------------------------
@@ -310,11 +305,6 @@ class MjlogGame:
     def from_str(cls, xml: str) -> "MjlogGame":
         return parse_mjlog(xml)
 
-    # -- validation ---------------------------------------------------------
-    def validate(self, raise_on_error: bool = True) -> "ValidationReport":
-        """Replay the game and validate every recorded state transition."""
-        return validate_game(self, raise_on_error=raise_on_error)
-
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -498,167 +488,6 @@ def _maybe_owari(game: MjlogGame, attr: Dict[str, str]) -> None:
     ow = attr["owari"].split(",")
     game.final_scores = [int(ow[i]) for i in range(0, 8, 2)]
     game.final_points = [float(ow[i]) for i in range(1, 8, 2)]
-
-
-# ---------------------------------------------------------------------------
-# Validation: replay the bookkeeping and compare with the log
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ValidationReport:
-    """The outcome of :func:`validate_game`."""
-
-    n_rounds: int = 0
-    n_decisions: int = 0
-    errors: List[str] = field(default_factory=list)
-    final_scores: Optional[List[int]] = None
-    reached_game_end: bool = False
-
-    @property
-    def ok(self) -> bool:
-        return not self.errors
-
-    def summary(self) -> str:
-        head = "OK" if self.ok else f"FAILED ({len(self.errors)} error(s))"
-        lines = [
-            f"mjlog validation: {head}",
-            f"  rounds:    {self.n_rounds}",
-            f"  decisions: {self.n_decisions}",
-        ]
-        if self.final_scores is not None:
-            lines.append("  final:     " + ", ".join(str(s * 100) for s in self.final_scores))
-        for err in self.errors:
-            lines.append(f"  - {err}")
-        return "\n".join(lines)
-
-
-def validate_game(game: MjlogGame, raise_on_error: bool = True) -> ValidationReport:
-    """Re-derive every score / kyotaku / honba / hand transition.
-
-    The running score vector is recomputed independently from the recorded
-    deltas and is checked against every *authoritative* score the log states
-    (``INIT`` opening scores, ``REACH`` confirmations, ``AGARI`` / ``RYUUKYOKU``
-    ``sc`` snapshots and the closing ``owari``).  Riichi sticks on the table
-    (kyotaku) and per-round tile flow are validated as well.  Total points are
-    conserved at 100000 throughout.
-    """
-    report = ValidationReport(n_rounds=len(game.rounds))
-
-    def err(msg: str) -> None:
-        report.errors.append(msg)
-        if raise_on_error:
-            raise MjlogValidationError(msg)
-
-    score: Optional[List[int]] = None
-    kyotaku = 0  # riichi sticks on the table, in units of 100 (10 == 1000)
-
-    for r in game.rounds:
-        report.n_decisions += len(r.decisions)
-        label = f"round#{r.round}.{r.honba}"
-
-        # 1. opening scores must continue from the previous round.
-        if score is not None and r.init_scores != score:
-            err(f"{label}: INIT ten {r.init_scores} != carried score {score}")
-        # 2. riichi sticks carried on the table must match the INIT seed.
-        if kyotaku != r.riichi_sticks * 10:
-            err(f"{label}: kyotaku {kyotaku} != INIT riichi sticks " f"{r.riichi_sticks} (*10)")
-        score = list(r.init_scores)
-
-        # 3. tile flow: every discard came from a hand, calls consume hand
-        #    tiles, no duplicate tile ids.
-        _validate_round_flow(r, err, label)
-
-        # 4. riichi confirmations: each places a 1000-point stick. Cross-check
-        #    the score snapshot Tenhou records at ``<REACH step="2">``.
-        for who, ten in r.riichi_confirmations:
-            score[who] -= 10
-            if ten and ten != score:
-                err(f"{label}: REACH(who={who}) ten {ten} != running {score}")
-            kyotaku += 10
-
-        # 5. apply the terminal deltas and reconcile the snapshot.
-        for result in r.results:
-            if result.score_before != score:
-                err(
-                    f"{label}: result sc-before {result.score_before} != " f"running score {score}"
-                )
-            delta_sum = sum(result.score_delta)
-            if isinstance(result, Win):
-                if delta_sum != kyotaku:
-                    err(f"{label}: AGARI delta sum {delta_sum} != " f"kyotaku {kyotaku}")
-                kyotaku = 0  # winner collects the sticks
-            else:
-                if delta_sum != 0:
-                    err(f"{label}: RYUUKYOKU delta sum {delta_sum} != 0")
-                # exhaustive/abortive draw: sticks stay on the table.
-            score = [score[i] + result.score_delta[i] for i in range(4)]
-
-    # 6. reconcile the closing scores.
-    if game.final_scores is not None and score is not None:
-        report.reached_game_end = True
-        if kyotaku:  # leftover sticks go to the leader (lowest seat on a tie).
-            lead = max(range(4), key=lambda i: (score[i], -i))
-            score[lead] += kyotaku
-            kyotaku = 0
-        if score != game.final_scores:
-            err(f"owari {game.final_scores} != reconciled {score}")
-        report.final_scores = game.final_scores
-
-    # 7. total points are always conserved.
-    if score is not None:
-        total = sum(score) * 100 + kyotaku * 100
-        if total != 100000:
-            err(f"point conservation broken: total = {total} (expected 100000)")
-
-    return report
-
-
-def _validate_round_flow(r: RoundLog, err, label: str) -> None:
-    """Replay one round's tile flow.
-
-    Validates that opening hands are 13 tiles with no duplicate ids and that
-    every discard came from a tile the player actually held (calls consume the
-    appropriate tiles from the caller's concealed hand).
-    """
-    # Every tile id 0..135 is unique within a round, so a set models the
-    # concealed hand exactly.
-    hands = [set(h) for h in r.init_hands]
-    seen = set()
-    for i, h in enumerate(r.init_hands):
-        if len(h) != 13:
-            err(f"{label}: player {i} opening hand has {len(h)} tiles")
-        dup = seen & set(h)
-        if dup:
-            err(f"{label}: duplicate tile id(s) {sorted(dup)} at INIT")
-        seen |= set(h)
-
-    for e in r.events:
-        if e.type is DecisionType.DRAW:
-            if e.tile in seen:
-                err(f"{label}: tile {e.tile} drawn twice in the round")
-            seen.add(e.tile)
-            hands[e.who].add(e.tile)
-        elif e.type in (
-            DecisionType.DISCARD,
-            DecisionType.TSUMOGIRI,
-            DecisionType.RIICHI,
-        ):
-            if e.tile not in hands[e.who]:
-                err(f"{label}: player {e.who} discarded {e.tile} not in hand")
-            hands[e.who].discard(e.tile)
-        elif e.meld is not None:
-            meld = e.meld
-            if meld.kind == "closed_kan":
-                from_hand = list(meld.tiles)
-            elif meld.kind == "added_kan":
-                from_hand = [meld.tiles[3]]  # only the added tile leaves hand
-            else:  # chi / pon / open_kan: every tile except the stolen one
-                from_hand = [t for i, t in enumerate(meld.tiles) if i != meld.called]
-            for t in from_hand:
-                if t not in hands[meld.who]:
-                    err(f"{label}: player {meld.who} {meld.kind} uses {t} " f"not in hand")
-                hands[meld.who].discard(t)
 
 
 # ---------------------------------------------------------------------------
@@ -874,41 +703,3 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
             if tl is not None and tl.type() == want_type:
                 return a
         return None
-
-
-def replay_and_validate(source: str, raise_on_error: bool = True) -> ValidationReport:
-    """Convenience: parse ``source`` (path or XML) and validate it."""
-    return parse_mjlog(source).validate(raise_on_error=raise_on_error)
-
-
-def _main(argv: Optional[List[str]] = None) -> int:
-    import argparse
-    import glob as _glob
-
-    parser = argparse.ArgumentParser(
-        description="Replay Tenhou mjlog files and validate state computation."
-    )
-    parser.add_argument("paths", nargs="+", help="mjlog file(s) or glob(s)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="print a per-file report")
-    args = parser.parse_args(argv)
-
-    files: List[str] = []
-    for p in args.paths:
-        files.extend(sorted(_glob.glob(p)) or [p])
-
-    n_ok = 0
-    for path in files:
-        report = parse_mjlog(path).validate(raise_on_error=False)
-        if report.ok:
-            n_ok += 1
-        name = path.rsplit("/", 1)[-1]
-        status = "OK  " if report.ok else "FAIL"
-        print(f"{status} {name}  rounds={report.n_rounds}")
-        if args.verbose or not report.ok:
-            print(report.summary())
-    print(f"\n{n_ok}/{len(files)} files validated")
-    return 0 if n_ok == len(files) else 1
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(_main())
