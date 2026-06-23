@@ -1,6 +1,7 @@
 #ifndef MAHJONG_ENVIRONMENT_H
 #define MAHJONG_ENVIRONMENT_H
 
+#include <cstdint>
 #include "mjx/internal/agent.h"
 #include "mjx/internal/game_result_summarizer.h"
 #include "mjx/internal/state.h"

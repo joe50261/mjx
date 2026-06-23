@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "action.h"
 
 #include <optional>

@@ -1,6 +1,7 @@
 #ifndef MAHJONG_SHANTEN_CALCULATOR_H
 #define MAHJONG_SHANTEN_CALCULATOR_H
 
+#include <cstdint>
 #include <array>
 #include <bitset>
 #include <vector>

@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "seed_generator.h"
 
 namespace mjx {

@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/internal/open.h"
 
 #include <algorithm>

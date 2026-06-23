@@ -118,7 +118,7 @@ class Observation:
 
         # TODO: use ndarray in C++ side
         if feature_name == "han22-v0":
-            feature = np.array(self._cpp_obj.to_features_2d(feature_name), dtype=np.bool8)  # type: ignore
+            feature = np.array(self._cpp_obj.to_features_2d(feature_name), dtype=np.bool_)  # type: ignore
             return feature
         feature = np.array(self._cpp_obj.to_features_2d(feature_name), dtype=np.int32)  # type: ignore
         return feature

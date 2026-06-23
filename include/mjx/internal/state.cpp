@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "mjx/internal/state.h"
 
 #include <google/protobuf/util/json_util.h>

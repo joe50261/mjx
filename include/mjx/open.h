@@ -1,6 +1,7 @@
 #ifndef MJX_PROJECT_OPEN_H
 #define MJX_PROJECT_OPEN_H
 
+#include <cstdint>
 #include "mjx/internal/mjx.grpc.pb.h"
 
 namespace mjx {
