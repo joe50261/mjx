@@ -494,21 +494,10 @@ def _maybe_owari(game: MjlogGame, attr: Dict[str, str]) -> None:
 # MjlogReplayAgent
 # ---------------------------------------------------------------------------
 
-# The agent integrates with the native Mjx engine when it is available so that
-# it can be driven through ``mjx.MjxEnv`` like any other ``mjx.Agent``.  The
-# parsing / validation API above works without the engine, so we fall back to a
-# plain base class when ``_mjx`` is not built.
-try:  # pragma: no cover - exercised only when the native extension is built
-    from mjx.action import Action as _Action  # type: ignore
-    from mjx.agents import Agent as _AgentBase  # type: ignore
-    from mjx.const import ActionType as _ActionType  # type: ignore
-
-    _ENGINE_AVAILABLE = True
-except Exception:  # ModuleNotFoundError when _mjx is missing, etc.
-    _AgentBase = object  # type: ignore
-    _Action = None  # type: ignore
-    _ActionType = None  # type: ignore
-    _ENGINE_AVAILABLE = False
+# MjlogReplayAgent is an ordinary mjx.Agent driven through mjx.MjxEnv like any
+# other agent.
+from mjx.agents import Agent as _AgentBase
+from mjx.const import ActionType as _ActionType
 
 
 # Maps our DecisionType onto the engine's ActionType names (resolved lazily).
@@ -537,18 +526,17 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
     other agent -- ``act_batch`` and ``serve`` are inherited unchanged, and it
     passes ``mjx.agents.validate_agent``.
 
-    It carries no engine or decoder logic: decoding a ``.mjlog`` into an
-    ``mjx.State`` (wall reconstruction etc.) and validating the engine are
-    separate concerns, not the agent's. For log-only score/hand consistency see
-    :meth:`MjlogGame.validate`.
+    It carries no engine or decoder logic: it does not reconstruct the engine's
+    state, it just plays the recorded action. Four of them in ``mjx.MjxEnv`` (on
+    a wall dealt from the game's seed) reproduce the game and let the engine
+    recompute every state transition.
 
         agent = MjlogReplayAgent.from_file("game.mjlog")
         action = agent.act(observation)
     """
 
     def __init__(self, game: MjlogGame) -> None:
-        if _ENGINE_AVAILABLE:
-            _AgentBase.__init__(self)  # type: ignore[misc]
+        _AgentBase.__init__(self)
         self.game = game
         self._reset_cursor()
 
@@ -581,21 +569,14 @@ class MjlogReplayAgent(_AgentBase):  # type: ignore[misc]
             i: None for i in range(4)
         }
 
-    # -- mjx.Agent interface (requires the native engine) -------------------
+    # -- mjx.Agent interface ------------------------------------------------
     def act(self, observation):  # type: ignore[override]
         """Return the recorded action matching ``observation``.
 
-        Requires the native ``_mjx`` extension.  The player's next recorded
-        positive decision is matched against the legal actions and consumed;
-        when nothing matches, a single forced action is taken as-is and an
-        offered-but-declined call becomes a pass/no-op.
+        The player's next recorded positive decision is matched against the legal
+        actions and consumed; when nothing matches, a single forced action is
+        taken as-is and an offered-but-declined call becomes a pass/no-op.
         """
-        if not _ENGINE_AVAILABLE:
-            raise RuntimeError(
-                "MjlogReplayAgent.act requires the native Mjx engine (_mjx). "
-                "Use validate()/decisions() for engine-independent replay."
-            )
-
         legal = observation.legal_actions()
         who = observation.who()
 

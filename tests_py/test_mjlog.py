@@ -1,9 +1,6 @@
-"""Tests for :mod:`mjx.mjlog`.
-
-The parser is pure-Python and runs without the native ``_mjx`` extension.
-``MjlogReplayAgent`` is a thin scripted-replay agent; the tests that drive it
-(and check the engine's state computation) need the engine and are skipped when
-it is not built.
+"""Tests for :mod:`mjx.mjlog`: the Tenhou log parser, the scripted-replay
+``MjlogReplayAgent``, and the engine's state computation when four of them
+reproduce a recorded game through ``mjx.MjxEnv``.
 """
 
 import glob
@@ -11,7 +8,6 @@ import os
 
 import pytest
 
-import mjx.mjlog as _m
 from mjx.mjlog import (
     DecisionType,
     MjlogReplayAgent,
@@ -25,10 +21,6 @@ from mjx.mjlog import (
 RESOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "mjlog")
 UPLOADED = os.path.join(RESOURCE_DIR, "2026040201gm-00a9-0000-1c038792.mjlog")
 MJLOGS = sorted(glob.glob(os.path.join(RESOURCE_DIR, "*.mjlog")))
-
-requires_engine = pytest.mark.skipif(
-    not _m._ENGINE_AVAILABLE, reason="native _mjx engine not built"
-)
 
 
 def test_resources_present():
@@ -136,14 +128,6 @@ def test_agent_script_matches_parsed_decisions():
         assert len(agent._queues[who]) == parsed[who]
 
 
-def test_act_requires_engine_when_absent():
-    agent = MjlogReplayAgent.from_file(UPLOADED)
-    if not _m._ENGINE_AVAILABLE:
-        with pytest.raises(RuntimeError):
-            agent.act(object())
-
-
-@requires_engine
 def test_agent_is_a_mjx_agent():
     import mjx
     from mjx.agents import MjlogReplayAgent as FromAgents
@@ -153,7 +137,6 @@ def test_agent_is_a_mjx_agent():
     assert FromAgents is MjlogReplayAgent  # exposed alongside the other agents
 
 
-@requires_engine
 def test_agent_passes_validate_agent():
     """Satisfies the same contract harness as every built-in agent."""
     from mjx.agents import validate_agent
@@ -163,7 +146,6 @@ def test_agent_passes_validate_agent():
     validate_agent(agent, n_games=1, use_batch=True)
 
 
-@requires_engine
 def test_act_returns_a_legal_action():
     import mjx
 
@@ -205,7 +187,6 @@ def _engine_final_scores(game):
     return [t // 100 for t in tens]  # units of 100, like the log's owari
 
 
-@requires_engine
 def test_reset_from_tenhou_seed_reproduces_wall():
     """The engine deals exactly the tiles Tenhou dealt for the seed."""
     import mjx
@@ -221,7 +202,6 @@ def test_reset_from_tenhou_seed_reproduces_wall():
     assert wall[130] == r0.dora_indicators[0]
 
 
-@requires_engine
 def test_engine_reproduces_uploaded_game():
     game = parse_mjlog(UPLOADED)
     assert _engine_final_scores(game) == game.final_scores
@@ -234,7 +214,6 @@ _COMPLETE = [
 ]
 
 
-@requires_engine
 @pytest.mark.parametrize("path", _COMPLETE, ids=[os.path.basename(p) for p in _COMPLETE])
 def test_engine_reproduces_corpus(path):
     game = parse_mjlog(path)
